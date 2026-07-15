@@ -36,6 +36,7 @@ import com.boredgaming.boredbrowser.MainActivity
 import com.boredgaming.boredbrowser.R
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 class FloatingGuideService : Service() {
     private lateinit var windowManager: WindowManager
@@ -110,9 +111,9 @@ class FloatingGuideService : Service() {
             contentDescription = "BoredBrowser bubble"
             setImageResource(R.drawable.logo)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            background = roundedDrawable(0xFF14161B.toInt(), 0xFF31353D.toInt(), dp(16).toFloat())
-            setPadding(dp(3), dp(3), dp(3), dp(3))
-            elevation = dp(8).toFloat()
+            background = roundedDrawable(0xFF14161B.toInt(), 0xFF31353D.toInt(), sdp(16).toFloat())
+            setPadding(sdp(3), sdp(3), sdp(3), sdp(3))
+            elevation = sdp(8).toFloat()
             alpha = effectiveBubbleAlpha()
             setOnClickListener { toggleBrowser() }
             setOnLongClickListener {
@@ -122,13 +123,13 @@ class FloatingGuideService : Service() {
         }
 
         val params = WindowManager.LayoutParams(
-            dp(58), dp(58), overlayType(),
+            bubbleSize(), bubbleSize(), overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = prefs.getInt(KEY_BUBBLE_X, screenWidth() - dp(66))
-            y = prefs.getInt(KEY_BUBBLE_Y, dp(8))
+            x = prefs.getInt(KEY_BUBBLE_X, screenWidth() - bubbleSize() - sdp(8))
+            y = prefs.getInt(KEY_BUBBLE_Y, sdp(8))
         }
 
         attachDrag(bubble, params, snap = true)
@@ -151,25 +152,25 @@ class FloatingGuideService : Service() {
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedDrawable(0xFF1D2128.toInt(), 0xFF31353D.toInt(), dp(8).toFloat())
-            elevation = dp(10).toFloat()
+            background = roundedDrawable(0xFF1D2128.toInt(), 0xFF31353D.toInt(), sdp(8).toFloat())
+            elevation = sdp(10).toFloat()
         }
 
         val titleBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), dp(4), dp(6), dp(4))
+            setPadding(sdp(6), sdp(4), sdp(6), sdp(4))
             setBackgroundColor(0xFF14161B.toInt())
         }
         val address = EditText(this).apply {
             setSingleLine(true)
-            textSize = 13f
+            textSize = scaledSp(13f)
             setTextColor(Color.WHITE)
             setHintTextColor(0xFFA9ADB5.toInt())
             hint = "Search or URL"
             setText(url)
-            background = roundedDrawable(0xFF252A33.toInt(), 0xFF31353D.toInt(), dp(6).toFloat())
-            setPadding(dp(8), 0, dp(8), 0)
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF31353D.toInt(), sdp(6).toFloat())
+            setPadding(sdp(8), 0, sdp(8), 0)
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_GO
             setOnEditorActionListener { view, _, _ ->
                 val target = normalizeUrl(view.text.toString())
@@ -200,10 +201,10 @@ class FloatingGuideService : Service() {
         webView = web
 
         titleBar.addView(iconButton("⌂") { web.loadUrl(DEFAULT_URL) })
-        titleBar.addView(address, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(4); marginEnd = dp(4) })
+        titleBar.addView(address, LinearLayout.LayoutParams(0, toolbarButtonSize(), 1f).apply { marginStart = sdp(4); marginEnd = sdp(4) })
         titleBar.addView(menuButton("⋮") { anchor -> showToolbarMenu(anchor, web) })
 
-        container.addView(titleBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+        container.addView(titleBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, toolbarHeight()))
         container.addView(web, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         val params = WindowManager.LayoutParams(
@@ -259,8 +260,8 @@ class FloatingGuideService : Service() {
 
     private fun dockBubbleAtTop() {
         val params = bubbleParams ?: return
-        params.x = max(dp(8), screenWidth() - params.width - dp(8))
-        params.y = dp(8)
+        params.x = max(sdp(8), screenWidth() - params.width - sdp(8))
+        params.y = sdp(8)
         prefs.edit().putInt(KEY_BUBBLE_X, params.x).putInt(KEY_BUBBLE_Y, params.y).apply()
         bubbleView?.let { runCatching { windowManager.updateViewLayout(it, params) } }
     }
@@ -287,12 +288,12 @@ class FloatingGuideService : Service() {
             contentDescription = "Drag here to close BoredBrowser"
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
-            textSize = 34f
+            textSize = scaledSp(34f)
             typeface = Typeface.DEFAULT_BOLD
             background = ovalDrawable(0xDD3B1111.toInt(), 0xFFFF6B5C.toInt())
-            elevation = dp(9).toFloat()
+            elevation = sdp(9).toFloat()
         }
-        val size = dp(72)
+        val size = closeTargetSize()
         val params = WindowManager.LayoutParams(
             size, size, overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
@@ -300,7 +301,7 @@ class FloatingGuideService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = (screenWidth() - size) / 2
-            y = screenHeight() - dp(104)
+            y = screenHeight() - closeTargetSize() - sdp(32)
         }
         closeTargetView = target
         windowManager.addView(target, params)
@@ -324,7 +325,7 @@ class FloatingGuideService : Service() {
     private fun isInCloseTarget(params: WindowManager.LayoutParams): Boolean {
         val centerX = params.x + params.width / 2
         val centerY = params.y + params.height / 2
-        return centerY >= screenHeight() - dp(148) && centerX >= screenWidth() / 2 - dp(88) && centerX <= screenWidth() / 2 + dp(88)
+        return centerY >= screenHeight() - closeTargetSize() - sdp(76) && centerX >= screenWidth() / 2 - sdp(88) && centerX <= screenWidth() / 2 + sdp(88)
     }
     private fun attachDrag(handle: View, params: WindowManager.LayoutParams, snap: Boolean) {
         var initialX = 0
@@ -347,7 +348,7 @@ class FloatingGuideService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
-                    moved = moved || abs(dx) > dp(4) || abs(dy) > dp(4)
+                    moved = moved || abs(dx) > sdp(4) || abs(dy) > sdp(4)
                     params.x = clampToScreen(initialX + dx, params.width, screenWidth())
                     params.y = clampToScreen(initialY + dy, params.height, screenHeight())
                     runCatching { windowManager.updateViewLayout(targetView, params) }
@@ -362,7 +363,7 @@ class FloatingGuideService : Service() {
                     }
 
                     if (snap && moved) {
-                        params.x = if (params.x + params.width / 2 < screenWidth() / 2) dp(8) else max(dp(8), screenWidth() - params.width - dp(8))
+                        params.x = if (params.x + params.width / 2 < screenWidth() / 2) sdp(8) else max(sdp(8), screenWidth() - params.width - sdp(8))
                         params.y = clampToScreen(params.y, params.height, screenHeight())
                         prefs.edit().putInt(KEY_BUBBLE_X, params.x).putInt(KEY_BUBBLE_Y, params.y).apply()
                         runCatching { windowManager.updateViewLayout(targetView, params) }
@@ -389,14 +390,14 @@ class FloatingGuideService : Service() {
         return ImageButton(this).apply {
             contentDescription = description
             setImageDrawable(TextDrawable(label))
-            background = roundedDrawable(0xFF252A33.toInt(), 0xFF31353D.toInt(), dp(6).toFloat())
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF31353D.toInt(), sdp(6).toFloat())
             setOnClickListener { action() }
             setOnLongClickListener {
                 Toast.makeText(this@FloatingGuideService, description, Toast.LENGTH_SHORT).show()
                 true
             }
-            val size = dp(38)
-            layoutParams = LinearLayout.LayoutParams(size, size).apply { marginEnd = dp(4) }
+            val size = toolbarButtonSize()
+            layoutParams = LinearLayout.LayoutParams(size, size).apply { marginEnd = sdp(4) }
         }
     }
 
@@ -406,13 +407,13 @@ class FloatingGuideService : Service() {
         return ImageButton(this).apply {
             contentDescription = description
             setImageDrawable(TextDrawable(label))
-            background = roundedDrawable(0xFF252A33.toInt(), 0xFF31353D.toInt(), dp(6).toFloat())
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF31353D.toInt(), sdp(6).toFloat())
             setOnClickListener { action(it) }
             setOnLongClickListener {
                 Toast.makeText(this@FloatingGuideService, description, Toast.LENGTH_SHORT).show()
                 true
             }
-            val size = dp(38)
+            val size = toolbarButtonSize()
             layoutParams = LinearLayout.LayoutParams(size, size)
         }
     }
@@ -421,19 +422,19 @@ class FloatingGuideService : Service() {
         lateinit var popup: PopupWindow
         val menu = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedDrawable(0xFF252A33.toInt(), 0xFF3A404B.toInt(), dp(8).toFloat())
-            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF3A404B.toInt(), sdp(8).toFloat())
+            setPadding(sdp(6), sdp(6), sdp(6), sdp(6))
         }
 
         fun addMenuItem(label: String, description: String, action: () -> Unit) {
             val item = TextView(this).apply {
                 text = label
                 contentDescription = description
-                textSize = 14f
+                textSize = scaledSp(14f)
                 setTextColor(Color.WHITE)
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                minWidth = dp(148)
-                background = roundedDrawable(0x00252A33, 0x0031353D, dp(6).toFloat())
+                setPadding(sdp(12), sdp(10), sdp(12), sdp(10))
+                minWidth = menuMinWidth()
+                background = roundedDrawable(0x00252A33, 0x0031353D, sdp(6).toFloat())
                 setOnClickListener {
                     popup.dismiss()
                     action()
@@ -443,7 +444,7 @@ class FloatingGuideService : Service() {
                     true
                 }
             }
-            menu.addView(item, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
+            menu.addView(item, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
         }
 
         addMenuItem("Back", "Go back") { if (web.canGoBack()) web.goBack() }
@@ -454,9 +455,9 @@ class FloatingGuideService : Service() {
 
         popup = PopupWindow(menu, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
             isOutsideTouchable = true
-            elevation = dp(8).toFloat()
+            elevation = sdp(8).toFloat()
         }
-        popup.showAsDropDown(anchor, -dp(116), dp(4))
+        popup.showAsDropDown(anchor, -menuHorizontalOffset(), sdp(4))
     }
     private fun buttonDescription(label: String): String = when (label) {
         "☰" -> "Open BoredBrowser launcher"
@@ -507,15 +508,29 @@ class FloatingGuideService : Service() {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = radius
         setColor(fill)
-        setStroke(dp(1), stroke)
+        setStroke(sdp(1), stroke)
     }
 
     private fun ovalDrawable(fill: Int, stroke: Int): GradientDrawable = GradientDrawable().apply {
         shape = GradientDrawable.OVAL
         setColor(fill)
-        setStroke(dp(2), stroke)
+        setStroke(sdp(2), stroke)
     }
 
+    private fun uiScale(): Float {
+        val shortestDp = minOf(screenBoundsWidth(), screenBoundsHeight()) / resources.displayMetrics.density
+        return (shortestDp / 420f).coerceIn(0.82f, 1.18f)
+    }
+
+    private fun sdp(value: Int): Int = max(1, (value * uiScale() * resources.displayMetrics.density).roundToInt())
+    private fun scaledSp(value: Float): Float = value * uiScale().coerceIn(0.90f, 1.12f)
+    private fun bubbleSize(): Int = sdp(58).coerceIn(dp(46), dp(72))
+    private fun toolbarButtonSize(): Int = sdp(38).coerceIn(dp(34), dp(48))
+    private fun toolbarHeight(): Int = sdp(48).coerceIn(dp(42), dp(60))
+    private fun closeTargetSize(): Int = sdp(72).coerceIn(dp(58), dp(88))
+    private fun menuItemHeight(): Int = sdp(42).coerceIn(dp(38), dp(52))
+    private fun menuMinWidth(): Int = sdp(148).coerceIn(dp(128), dp(190))
+    private fun menuHorizontalOffset(): Int = sdp(116).coerceIn(dp(96), dp(160))
     private fun overlayType(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
     private fun pendingFlags(): Int = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
