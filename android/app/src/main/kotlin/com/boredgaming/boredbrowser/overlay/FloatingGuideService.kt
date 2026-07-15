@@ -22,6 +22,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebChromeClient
+import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -66,6 +67,19 @@ class FloatingGuideService : Service() {
     private var lastScrollY: Int = 0
     private var bubbleVisible: Boolean = true
     private var bubbleOpacity: Float = 1f
+
+    private inner class ScrollBridge {
+        @JavascriptInterface
+        fun save(x: Int, y: Int, url: String?) {
+            webView?.post {
+                val pageUrl = url?.takeIf { it.isNotBlank() } ?: webView?.url ?: lastUrl
+                lastUrl = pageUrl
+                lastScrollX = x.coerceAtLeast(0)
+                lastScrollY = y.coerceAtLeast(0)
+                persistScroll(pageUrl, lastScrollX, lastScrollY)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -224,12 +238,14 @@ class FloatingGuideService : Service() {
                             .putInt(KEY_SCROLL_Y, lastScrollY)
                             .apply()
                         address.setText(it)
+                        installScrollBridge(view)
                         recordHistory(it, view?.title)
                         restoreScrollWhenReady()
                     }
                 }
             }
             webChromeClient = WebChromeClient()
+            addJavascriptInterface(ScrollBridge(), SCROLL_BRIDGE_NAME)
             if (webState?.let { restoreState(it) != null } != true) {
                 loadUrl(normalizeUrl(url))
             }
@@ -343,12 +359,8 @@ class FloatingGuideService : Service() {
             if (saveBundle) {
                 webState = Bundle().also { web.saveState(it) }
             }
-            prefs.edit()
-                .putString(KEY_LAST_URL, lastUrl)
-                .putInt(KEY_SCROLL_X, lastScrollX)
-                .putInt(KEY_SCROLL_Y, lastScrollY)
-                .apply()
-            rememberScrollFor(lastUrl, lastScrollX, lastScrollY)
+            persistScroll(lastUrl, lastScrollX, lastScrollY)
+            capturePageScroll(web)
         }
     }
 
@@ -362,10 +374,85 @@ class FloatingGuideService : Service() {
         web.postDelayed({
             val current = webView ?: return@postDelayed
             current.scrollTo(lastScrollX, lastScrollY)
+            restorePageScroll(current, lastScrollX, lastScrollY)
             if (attempt < SCROLL_RESTORE_ATTEMPTS && current.scrollY < lastScrollY) {
                 restoreScrollAttempt(attempt + 1)
             }
         }, SCROLL_RESTORE_DELAY_MS)
+    }
+
+    private fun installScrollBridge(web: WebView?) {
+        web?.evaluateJavascript(
+            """
+            (function() {
+              if (window.__boredBrowserScrollHook) return;
+              window.__boredBrowserScrollHook = true;
+              var send = function() {
+                var x = Math.round(window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0);
+                var y = Math.round(window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0);
+                if (window.$SCROLL_BRIDGE_NAME && window.$SCROLL_BRIDGE_NAME.save) {
+                  window.$SCROLL_BRIDGE_NAME.save(x, y, window.location.href);
+                }
+              };
+              window.addEventListener('scroll', function() {
+                clearTimeout(window.__boredBrowserScrollTimer);
+                window.__boredBrowserScrollTimer = setTimeout(send, 120);
+              }, { passive: true });
+              window.addEventListener('pagehide', send);
+              send();
+            })();
+            """.trimIndent(),
+            null,
+        )
+    }
+
+    private fun capturePageScroll(web: WebView) {
+        web.evaluateJavascript(
+            """
+            (function() {
+              return JSON.stringify({
+                x: Math.round(window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0),
+                y: Math.round(window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0),
+                url: window.location.href
+              });
+            })();
+            """.trimIndent(),
+        ) { value ->
+            val payload = decodeJsString(value) ?: return@evaluateJavascript
+            runCatching {
+                val json = JSONObject(payload)
+                val pageUrl = json.optString("url", lastUrl).takeIf { it.isNotBlank() } ?: lastUrl
+                lastUrl = pageUrl
+                lastScrollX = json.optInt("x", lastScrollX).coerceAtLeast(0)
+                lastScrollY = json.optInt("y", lastScrollY).coerceAtLeast(0)
+                persistScroll(pageUrl, lastScrollX, lastScrollY)
+            }
+        }
+    }
+
+    private fun restorePageScroll(web: WebView, x: Int, y: Int) {
+        web.evaluateJavascript(
+            """
+            (function() {
+              var x = $x;
+              var y = $y;
+              window.scrollTo(x, y);
+              document.documentElement.scrollLeft = x;
+              document.documentElement.scrollTop = y;
+              if (document.body) {
+                document.body.scrollLeft = x;
+                document.body.scrollTop = y;
+              }
+              return Math.round(window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0);
+            })();
+            """.trimIndent(),
+            null,
+        )
+    }
+
+    private fun decodeJsString(value: String?): String? {
+        if (value.isNullOrBlank() || value == "null") return null
+        return runCatching { JSONArray("[$value]").getString(0) }.getOrNull()
     }
 
     private fun restoreRememberedScrollFor(url: String) {
@@ -386,6 +473,15 @@ class FloatingGuideService : Service() {
             put("savedAt", System.currentTimeMillis())
         })
         prefs.edit().putString(KEY_SCROLL_BY_URL, entries.toString()).apply()
+    }
+
+    private fun persistScroll(url: String, x: Int, y: Int) {
+        prefs.edit()
+            .putString(KEY_LAST_URL, url)
+            .putInt(KEY_SCROLL_X, x)
+            .putInt(KEY_SCROLL_Y, y)
+            .apply()
+        rememberScrollFor(url, x, y)
     }
 
     private fun bringBubbleToFront() {
@@ -816,6 +912,7 @@ class FloatingGuideService : Service() {
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
         private const val MIN_BUBBLE_OPACITY = 0.10f
         private const val HIDDEN_BUBBLE_OPACITY = 0.10f
+        private const val SCROLL_BRIDGE_NAME = "BoredBrowserScroll"
         private const val SCROLL_RESTORE_DELAY_MS = 250L
         private const val SCROLL_RESTORE_ATTEMPTS = 16
         private const val MAX_HISTORY_ENTRIES = 100
