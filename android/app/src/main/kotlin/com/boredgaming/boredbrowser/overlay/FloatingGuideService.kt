@@ -36,7 +36,6 @@ import com.boredgaming.boredbrowser.MainActivity
 import com.boredgaming.boredbrowser.R
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
 
 class FloatingGuideService : Service() {
     private lateinit var windowManager: WindowManager
@@ -144,6 +143,7 @@ class FloatingGuideService : Service() {
         dockBubbleAtTop()
         if (browserView != null) {
             browserView?.visibility = View.VISIBLE
+            resizeBrowserToScreen()
             webView?.loadUrl(normalizeUrl(url))
             bringBubbleToFront()
             return
@@ -206,25 +206,31 @@ class FloatingGuideService : Service() {
         container.addView(titleBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
         container.addView(web, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        val width = min(screenWidth() - dp(24), dp(430))
-        val height = min(screenHeight() - dp(80), dp(620))
         val params = WindowManager.LayoutParams(
-            width, height, overlayType(),
+            browserWidth(), browserHeight(), overlayType(),
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = prefs.getInt(KEY_BROWSER_X, dp(24))
-            y = prefs.getInt(KEY_BROWSER_Y, dp(72))
+            x = 0
+            y = 0
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
-        attachDrag(titleBar, params, snap = false)
         browserView = container
         browserParams = params
         windowManager.addView(container, params)
         bringBubbleToFront()
     }
 
+    private fun resizeBrowserToScreen() {
+        val view = browserView ?: return
+        val params = browserParams ?: return
+        params.width = browserWidth()
+        params.height = browserHeight()
+        params.x = 0
+        params.y = 0
+        runCatching { windowManager.updateViewLayout(view, params) }
+    }
     private fun openLauncher() {
         hideBrowser(returnToBubble = true)
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -360,8 +366,6 @@ class FloatingGuideService : Service() {
                         params.y = clampToScreen(params.y, params.height, screenHeight())
                         prefs.edit().putInt(KEY_BUBBLE_X, params.x).putInt(KEY_BUBBLE_Y, params.y).apply()
                         runCatching { windowManager.updateViewLayout(targetView, params) }
-                    } else if (!snap && moved) {
-                        prefs.edit().putInt(KEY_BROWSER_X, params.x).putInt(KEY_BROWSER_Y, params.y).apply()
                     } else if (event.actionMasked == MotionEvent.ACTION_UP) {
                         view.performClick()
                     }
@@ -515,8 +519,14 @@ class FloatingGuideService : Service() {
     private fun overlayType(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
     private fun pendingFlags(): Int = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-    private fun screenWidth(): Int = resources.displayMetrics.widthPixels
-    private fun screenHeight(): Int = resources.displayMetrics.heightPixels
+    private fun screenWidth(): Int = screenBoundsWidth()
+    private fun screenHeight(): Int = screenBoundsHeight()
+    private fun browserWidth(): Int = screenBoundsWidth()
+    private fun browserHeight(): Int = screenBoundsHeight()
+    private fun screenBoundsWidth(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) windowManager.currentWindowMetrics.bounds.width() else resources.displayMetrics.widthPixels
+    private fun screenBoundsHeight(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) windowManager.currentWindowMetrics.bounds.height() else resources.displayMetrics.heightPixels
     private fun hideKeyboard(view: View) = (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(view.windowToken, 0)
 
     companion object {
@@ -541,40 +551,8 @@ class FloatingGuideService : Service() {
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
         private const val MIN_BUBBLE_OPACITY = 0.10f
         private const val HIDDEN_BUBBLE_OPACITY = 0.10f
-        private const val KEY_BROWSER_X = "browser_x"
-        private const val KEY_BROWSER_Y = "browser_y"
         private const val DEFAULT_URL = "https://www.google.com"
         private const val KOFI_URL = "https://ko-fi.com/boredgamingph"
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
