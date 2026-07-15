@@ -63,6 +63,12 @@ BoredBrowser uses:
 
 The app asks the user to grant overlay permission before starting the floating browser.
 
+## Future Features
+- PDF loading if you have pdf guides
+- Saving Web Pages
+- Creating Collections for Game guides
+- No need for RA i think because you can just open the site, but I will add shortcuts to it in the browser options too
+  
 ## Branding
 
 Source logo files live in `assets/branding/`. Android launcher and bubble resources are generated into `android/app/src/main/res/`.
