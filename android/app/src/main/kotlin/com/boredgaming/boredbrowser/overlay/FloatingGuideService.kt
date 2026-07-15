@@ -216,8 +216,7 @@ class FloatingGuideService : Service() {
                         val previousUrl = lastUrl
                         lastUrl = it
                         if (previousUrl != it) {
-                            lastScrollX = 0
-                            lastScrollY = 0
+                            restoreRememberedScrollFor(it)
                         }
                         prefs.edit()
                             .putString(KEY_LAST_URL, it)
@@ -349,13 +348,44 @@ class FloatingGuideService : Service() {
                 .putInt(KEY_SCROLL_X, lastScrollX)
                 .putInt(KEY_SCROLL_Y, lastScrollY)
                 .apply()
+            rememberScrollFor(lastUrl, lastScrollX, lastScrollY)
         }
     }
 
     private fun restoreScrollWhenReady() {
-        webView?.postDelayed({
-            webView?.scrollTo(lastScrollX, lastScrollY)
+        restoreScrollAttempt(attempt = 0)
+    }
+
+    private fun restoreScrollAttempt(attempt: Int) {
+        val web = webView ?: return
+        if (lastScrollX == 0 && lastScrollY == 0) return
+        web.postDelayed({
+            val current = webView ?: return@postDelayed
+            current.scrollTo(lastScrollX, lastScrollY)
+            if (attempt < SCROLL_RESTORE_ATTEMPTS && current.scrollY < lastScrollY) {
+                restoreScrollAttempt(attempt + 1)
+            }
         }, SCROLL_RESTORE_DELAY_MS)
+    }
+
+    private fun restoreRememberedScrollFor(url: String) {
+        val raw = prefs.getString(KEY_SCROLL_BY_URL, "{}") ?: "{}"
+        runCatching {
+            val saved = JSONObject(raw).optJSONObject(url) ?: return@runCatching
+            lastScrollX = saved.optInt("x", 0)
+            lastScrollY = saved.optInt("y", 0)
+        }
+    }
+
+    private fun rememberScrollFor(url: String, x: Int, y: Int) {
+        val raw = prefs.getString(KEY_SCROLL_BY_URL, "{}") ?: "{}"
+        val entries = runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
+        entries.put(url, JSONObject().apply {
+            put("x", x)
+            put("y", y)
+            put("savedAt", System.currentTimeMillis())
+        })
+        prefs.edit().putString(KEY_SCROLL_BY_URL, entries.toString()).apply()
     }
 
     private fun bringBubbleToFront() {
@@ -780,12 +810,14 @@ class FloatingGuideService : Service() {
         private const val KEY_BUBBLE_Y = "bubble_y"
         private const val KEY_SCROLL_X = "scroll_x"
         private const val KEY_SCROLL_Y = "scroll_y"
+        private const val KEY_SCROLL_BY_URL = "scroll_by_url"
         private const val KEY_HISTORY = "browser_history"
         private const val KEY_SHOW_BUBBLE = "show_bubble"
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
         private const val MIN_BUBBLE_OPACITY = 0.10f
         private const val HIDDEN_BUBBLE_OPACITY = 0.10f
         private const val SCROLL_RESTORE_DELAY_MS = 250L
+        private const val SCROLL_RESTORE_ATTEMPTS = 16
         private const val MAX_HISTORY_ENTRIES = 100
         private const val HISTORY_MENU_LIMIT = 12
         private const val DEFAULT_URL = "https://www.google.com"
