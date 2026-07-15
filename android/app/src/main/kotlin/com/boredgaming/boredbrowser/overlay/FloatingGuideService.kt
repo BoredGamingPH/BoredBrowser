@@ -36,11 +36,20 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.boredgaming.boredbrowser.MainActivity
 import com.boredgaming.boredbrowser.R
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 class FloatingGuideService : Service() {
+    private data class HistoryEntry(
+        val title: String,
+        val url: String,
+        val lastVisitedAt: Long,
+        val visitCount: Int,
+    )
+
     private lateinit var windowManager: WindowManager
     private lateinit var prefs: SharedPreferences
     private var bubbleView: View? = null
@@ -214,6 +223,7 @@ class FloatingGuideService : Service() {
                             .putInt(KEY_SCROLL_Y, lastScrollY)
                             .apply()
                         address.setText(it)
+                        recordHistory(it, view?.title)
                         restoreScrollWhenReady()
                     }
                 }
@@ -506,6 +516,7 @@ class FloatingGuideService : Service() {
         addMenuItem("Back", "Go back") { if (web.canGoBack()) web.goBack() }
         addMenuItem("Forward", "Go forward") { if (web.canGoForward()) web.goForward() }
         addMenuItem("Reload", "Reload page") { web.reload() }
+        addMenuItem("History", "Open browsing history") { showHistoryPopup(anchor, web) }
         addMenuItem("☕ Donate", "Support BoredBrowser on Ko-fi") { web.loadUrl(KOFI_URL) }
         addMenuItem("Launcher", "Open BoredBrowser launcher") { openLauncher() }
 
@@ -515,6 +526,121 @@ class FloatingGuideService : Service() {
         }
         popup.showAsDropDown(anchor, -menuHorizontalOffset(), sdp(4))
     }
+
+    private fun showHistoryPopup(anchor: View, web: WebView) {
+        lateinit var popup: PopupWindow
+        val history = loadHistoryEntries()
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF3A404B.toInt(), sdp(8).toFloat())
+            setPadding(sdp(6), sdp(6), sdp(6), sdp(6))
+        }
+
+        val header = TextView(this).apply {
+            text = "History"
+            textSize = scaledSp(13f)
+            setTextColor(0xFFA9ADB5.toInt())
+            setPadding(sdp(12), sdp(8), sdp(12), sdp(8))
+        }
+        menu.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+
+        if (history.isEmpty()) {
+            val empty = TextView(this).apply {
+                text = "No pages yet"
+                textSize = scaledSp(14f)
+                setTextColor(Color.WHITE)
+                setPadding(sdp(12), sdp(10), sdp(12), sdp(10))
+                minWidth = historyMenuWidth()
+            }
+            menu.addView(empty, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+        } else {
+            history.take(HISTORY_MENU_LIMIT).forEach { entry ->
+                val item = TextView(this).apply {
+                    text = entry.title.ifBlank { entry.url }
+                    contentDescription = "Open ${entry.url}"
+                    textSize = scaledSp(14f)
+                    setTextColor(Color.WHITE)
+                    setSingleLine(true)
+                    setPadding(sdp(12), sdp(10), sdp(12), sdp(10))
+                    minWidth = historyMenuWidth()
+                    background = roundedDrawable(0x00252A33, 0x0031353D, sdp(6).toFloat())
+                    setOnClickListener {
+                        popup.dismiss()
+                        web.loadUrl(entry.url)
+                    }
+                    setOnLongClickListener {
+                        Toast.makeText(this@FloatingGuideService, entry.url, Toast.LENGTH_SHORT).show()
+                        true
+                    }
+                }
+                menu.addView(item, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+            }
+
+            val clear = TextView(this).apply {
+                text = "Clear History"
+                contentDescription = "Clear browsing history"
+                textSize = scaledSp(14f)
+                setTextColor(0xFFFFD0C8.toInt())
+                setPadding(sdp(12), sdp(10), sdp(12), sdp(10))
+                minWidth = historyMenuWidth()
+                setOnClickListener {
+                    prefs.edit().remove(KEY_HISTORY).apply()
+                    popup.dismiss()
+                }
+            }
+            menu.addView(clear, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+        }
+
+        popup = PopupWindow(menu, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
+            isOutsideTouchable = true
+            elevation = sdp(8).toFloat()
+        }
+        popup.showAsDropDown(anchor, -historyMenuHorizontalOffset(), sdp(4))
+    }
+
+    private fun recordHistory(url: String, title: String?) {
+        val normalizedUrl = normalizeUrl(url)
+        val existing = loadHistoryEntries()
+        val previous = existing.firstOrNull { it.url == normalizedUrl }
+        val updated = HistoryEntry(
+            title = title?.takeIf { it.isNotBlank() } ?: previous?.title ?: normalizedUrl,
+            url = normalizedUrl,
+            lastVisitedAt = System.currentTimeMillis(),
+            visitCount = (previous?.visitCount ?: 0) + 1,
+        )
+        val merged = listOf(updated) + existing.filterNot { it.url == normalizedUrl }
+        saveHistoryEntries(merged.take(MAX_HISTORY_ENTRIES))
+    }
+
+    private fun loadHistoryEntries(): List<HistoryEntry> {
+        val raw = prefs.getString(KEY_HISTORY, "[]") ?: "[]"
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                HistoryEntry(
+                    title = item.optString("title"),
+                    url = item.optString("url"),
+                    lastVisitedAt = item.optLong("lastVisitedAt"),
+                    visitCount = item.optInt("visitCount", 1),
+                )
+            }.filter { it.url.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveHistoryEntries(entries: List<HistoryEntry>) {
+        val array = JSONArray()
+        entries.forEach { entry ->
+            array.put(JSONObject().apply {
+                put("title", entry.title)
+                put("url", entry.url)
+                put("lastVisitedAt", entry.lastVisitedAt)
+                put("visitCount", entry.visitCount)
+            })
+        }
+        prefs.edit().putString(KEY_HISTORY, array.toString()).apply()
+    }
+
     private fun buttonDescription(label: String): String = when (label) {
         "☰" -> "Open BoredBrowser launcher"
         "‹" -> "Go back"
@@ -587,6 +713,8 @@ class FloatingGuideService : Service() {
     private fun menuItemHeight(): Int = sdp(42).coerceIn(dp(38), dp(52))
     private fun menuMinWidth(): Int = sdp(148).coerceIn(dp(128), dp(190))
     private fun menuHorizontalOffset(): Int = sdp(116).coerceIn(dp(96), dp(160))
+    private fun historyMenuWidth(): Int = sdp(230).coerceIn(dp(190), dp(300))
+    private fun historyMenuHorizontalOffset(): Int = sdp(198).coerceIn(dp(150), dp(250))
     private fun overlayType(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
     private fun pendingFlags(): Int = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -620,11 +748,14 @@ class FloatingGuideService : Service() {
         private const val KEY_BUBBLE_Y = "bubble_y"
         private const val KEY_SCROLL_X = "scroll_x"
         private const val KEY_SCROLL_Y = "scroll_y"
+        private const val KEY_HISTORY = "browser_history"
         private const val KEY_SHOW_BUBBLE = "show_bubble"
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
         private const val MIN_BUBBLE_OPACITY = 0.10f
         private const val HIDDEN_BUBBLE_OPACITY = 0.10f
         private const val SCROLL_RESTORE_DELAY_MS = 250L
+        private const val MAX_HISTORY_ENTRIES = 100
+        private const val HISTORY_MENU_LIMIT = 12
         private const val DEFAULT_URL = "https://www.google.com"
         private const val KOFI_URL = "https://ko-fi.com/boredgamingph"
     }
