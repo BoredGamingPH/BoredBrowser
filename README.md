@@ -13,7 +13,6 @@ The project is intentionally local-first and simple. There are no cloud features
 - Launcher controls for overlay permission, auto-launch, bubble visibility, and opacity
 - Browser toolbar with Home, address/search field, and a compact three-dot menu
 - Three-dot menu actions: Back, Forward, Reload, Donate, and Launcher
-- Ko-fi support link in both the launcher and floating browser menu
 - Adaptive Android launcher icon and custom floating bubble icon
 
 ## Project Structure
