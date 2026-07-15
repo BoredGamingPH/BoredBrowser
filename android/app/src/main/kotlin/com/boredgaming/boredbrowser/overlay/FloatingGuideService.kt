@@ -164,6 +164,7 @@ class FloatingGuideService : Service() {
         showBubble()
         if (browserView != null) {
             browserView?.visibility = View.VISIBLE
+            browserView?.alpha = 1f
             attachBrowserIfNeeded()
             resizeBrowserToScreen()
             restoreScrollWhenReady()
@@ -300,7 +301,7 @@ class FloatingGuideService : Service() {
     }
 
     private fun hideBrowser(returnToBubble: Boolean = true, destroy: Boolean = false) {
-        saveBrowserState()
+        saveBrowserState(saveBundle = destroy)
         if (destroy) {
             browserView?.let {
                 if (browserAttached) {
@@ -322,9 +323,10 @@ class FloatingGuideService : Service() {
     private fun minimizeBrowserWindow() {
         val view = browserView ?: return
         val params = browserParams ?: return
-        view.visibility = View.INVISIBLE
-        params.width = 1
-        params.height = 1
+        view.visibility = View.VISIBLE
+        view.alpha = 0f
+        params.width = browserWidth()
+        params.height = browserHeight()
         params.x = 0
         params.y = 0
         params.flags = browserWindowFlags(minimized = true)
@@ -334,12 +336,14 @@ class FloatingGuideService : Service() {
         }
     }
 
-    private fun saveBrowserState() {
+    private fun saveBrowserState(saveBundle: Boolean) {
         webView?.let { web ->
             lastUrl = web.url ?: lastUrl
             lastScrollX = web.scrollX
             lastScrollY = web.scrollY
-            webState = Bundle().also { web.saveState(it) }
+            if (saveBundle) {
+                webState = Bundle().also { web.saveState(it) }
+            }
             prefs.edit()
                 .putString(KEY_LAST_URL, lastUrl)
                 .putInt(KEY_SCROLL_X, lastScrollX)
