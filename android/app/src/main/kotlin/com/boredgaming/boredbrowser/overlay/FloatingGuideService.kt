@@ -181,6 +181,8 @@ class FloatingGuideService : Service() {
         if (browserView != null) {
             browserView?.visibility = View.VISIBLE
             browserView?.alpha = 1f
+            browserView?.translationX = 0f
+            browserView?.translationY = 0f
             attachBrowserIfNeeded()
             resizeBrowserToScreen()
             restoreScrollWhenReady()
@@ -341,11 +343,9 @@ class FloatingGuideService : Service() {
         val view = browserView ?: return
         val params = browserParams ?: return
         view.visibility = View.VISIBLE
-        view.alpha = 0f
-        params.width = browserWidth()
-        params.height = browserHeight()
-        params.x = 0
-        params.y = 0
+        view.alpha = 1f
+        view.translationX = (browserWidth() + sdp(24)).toFloat()
+        view.translationY = 0f
         params.flags = browserWindowFlags(minimized = true)
         browserMinimized = true
         if (browserAttached) {
