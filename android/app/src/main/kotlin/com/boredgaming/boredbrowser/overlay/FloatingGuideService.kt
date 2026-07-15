@@ -73,6 +73,8 @@ class FloatingGuideService : Service() {
         fun save(x: Int, y: Int, url: String?) {
             webView?.post {
                 val pageUrl = url?.takeIf { it.isNotBlank() } ?: webView?.url ?: lastUrl
+                val remembered = rememberedScrollFor(pageUrl)
+                if (y == 0 && remembered.second > 0 && browserMinimized) return@post
                 lastUrl = pageUrl
                 lastScrollX = x.coerceAtLeast(0)
                 lastScrollY = y.coerceAtLeast(0)
@@ -354,8 +356,14 @@ class FloatingGuideService : Service() {
     private fun saveBrowserState(saveBundle: Boolean) {
         webView?.let { web ->
             lastUrl = web.url ?: lastUrl
-            lastScrollX = web.scrollX
-            lastScrollY = web.scrollY
+            val remembered = rememberedScrollFor(lastUrl)
+            if (web.scrollY > 0 || remembered.second == 0) {
+                lastScrollX = web.scrollX
+                lastScrollY = web.scrollY
+            } else {
+                lastScrollX = remembered.first
+                lastScrollY = remembered.second
+            }
             if (saveBundle) {
                 webState = Bundle().also { web.saveState(it) }
             }
@@ -399,7 +407,6 @@ class FloatingGuideService : Service() {
                 window.__boredBrowserScrollTimer = setTimeout(send, 120);
               }, { passive: true });
               window.addEventListener('pagehide', send);
-              send();
             })();
             """.trimIndent(),
             null,
@@ -422,9 +429,12 @@ class FloatingGuideService : Service() {
             runCatching {
                 val json = JSONObject(payload)
                 val pageUrl = json.optString("url", lastUrl).takeIf { it.isNotBlank() } ?: lastUrl
+                val remembered = rememberedScrollFor(pageUrl)
+                val capturedY = json.optInt("y", lastScrollY).coerceAtLeast(0)
+                if (capturedY == 0 && remembered.second > 0 && browserMinimized) return@runCatching
                 lastUrl = pageUrl
                 lastScrollX = json.optInt("x", lastScrollX).coerceAtLeast(0)
-                lastScrollY = json.optInt("y", lastScrollY).coerceAtLeast(0)
+                lastScrollY = capturedY
                 persistScroll(pageUrl, lastScrollX, lastScrollY)
             }
         }
@@ -456,12 +466,17 @@ class FloatingGuideService : Service() {
     }
 
     private fun restoreRememberedScrollFor(url: String) {
+        val remembered = rememberedScrollFor(url)
+        lastScrollX = remembered.first
+        lastScrollY = remembered.second
+    }
+
+    private fun rememberedScrollFor(url: String): Pair<Int, Int> {
         val raw = prefs.getString(KEY_SCROLL_BY_URL, "{}") ?: "{}"
-        runCatching {
-            val saved = JSONObject(raw).optJSONObject(url) ?: return@runCatching
-            lastScrollX = saved.optInt("x", 0)
-            lastScrollY = saved.optInt("y", 0)
-        }
+        return runCatching {
+            val saved = JSONObject(raw).optJSONObject(url) ?: return@runCatching 0 to 0
+            saved.optInt("x", 0) to saved.optInt("y", 0)
+        }.getOrDefault(0 to 0)
     }
 
     private fun rememberScrollFor(url: String, x: Int, y: Int) {
