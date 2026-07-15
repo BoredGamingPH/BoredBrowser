@@ -60,6 +60,7 @@ class FloatingGuideService : Service() {
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var webState: Bundle? = null
     private var browserAttached: Boolean = false
+    private var browserMinimized: Boolean = false
     private var lastUrl: String = DEFAULT_URL
     private var lastScrollX: Int = 0
     private var lastScrollY: Int = 0
@@ -163,8 +164,8 @@ class FloatingGuideService : Service() {
         showBubble()
         if (browserView != null) {
             browserView?.visibility = View.VISIBLE
-            resizeBrowserToScreen()
             attachBrowserIfNeeded()
+            resizeBrowserToScreen()
             restoreScrollWhenReady()
             bringBubbleToFront()
             return
@@ -244,7 +245,7 @@ class FloatingGuideService : Service() {
 
         val params = WindowManager.LayoutParams(
             browserWidth(), browserHeight(), overlayType(),
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            browserWindowFlags(minimized = false),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -256,6 +257,7 @@ class FloatingGuideService : Service() {
         browserParams = params
         windowManager.addView(container, params)
         browserAttached = true
+        browserMinimized = false
         bringBubbleToFront()
     }
 
@@ -266,6 +268,8 @@ class FloatingGuideService : Service() {
         params.height = browserHeight()
         params.x = 0
         params.y = 0
+        params.flags = browserWindowFlags(minimized = false)
+        browserMinimized = false
         if (browserAttached) {
             runCatching { windowManager.updateViewLayout(view, params) }
         }
@@ -288,7 +292,7 @@ class FloatingGuideService : Service() {
     }
 
     private fun toggleBrowser() {
-        if (browserView == null || !browserAttached) {
+        if (browserView == null || !browserAttached || browserMinimized) {
             showBrowser(lastUrl)
         } else {
             hideBrowser(returnToBubble = false)
@@ -297,19 +301,37 @@ class FloatingGuideService : Service() {
 
     private fun hideBrowser(returnToBubble: Boolean = true, destroy: Boolean = false) {
         saveBrowserState()
-        browserView?.let {
-            if (browserAttached) {
-                runCatching { windowManager.removeView(it) }
-                browserAttached = false
-            }
-        }
         if (destroy) {
+            browserView?.let {
+                if (browserAttached) {
+                    runCatching { windowManager.removeView(it) }
+                    browserAttached = false
+                }
+            }
             browserView = null
             webView?.destroy()
             webView = null
             browserParams = null
+            browserMinimized = false
+        } else {
+            minimizeBrowserWindow()
         }
         if (returnToBubble) showBubble()
+    }
+
+    private fun minimizeBrowserWindow() {
+        val view = browserView ?: return
+        val params = browserParams ?: return
+        view.visibility = View.INVISIBLE
+        params.width = 1
+        params.height = 1
+        params.x = 0
+        params.y = 0
+        params.flags = browserWindowFlags(minimized = true)
+        browserMinimized = true
+        if (browserAttached) {
+            runCatching { windowManager.updateViewLayout(view, params) }
+        }
     }
 
     private fun saveBrowserState() {
@@ -715,6 +737,12 @@ class FloatingGuideService : Service() {
     private fun menuHorizontalOffset(): Int = sdp(116).coerceIn(dp(96), dp(160))
     private fun historyMenuWidth(): Int = sdp(230).coerceIn(dp(190), dp(300))
     private fun historyMenuHorizontalOffset(): Int = sdp(198).coerceIn(dp(150), dp(250))
+    private fun browserWindowFlags(minimized: Boolean): Int =
+        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or if (minimized) {
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            0
+        }
     private fun overlayType(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
     private fun pendingFlags(): Int = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
