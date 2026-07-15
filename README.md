@@ -67,8 +67,9 @@ The app asks the user to grant overlay permission before starting the floating b
 
 Source logo files live in `assets/branding/`. Android launcher and bubble resources are generated into `android/app/src/main/res/`.
 
-## Notes For Releases
+## Ko-Fi
+https://ko-fi.com/boredgamingph
 
-This repository is source code only. Build outputs are ignored by git. Upload APKs through GitHub Releases rather than committing them to the repository.
-
-Before a public release, replace the debug signing configuration with a real release keystore.
+## AI Disclaimer
+Current usages of AI is the generation of the Icons, UX designing and refinement
+and translation of this git Readme for grammar correction and conciseness
