@@ -185,7 +185,6 @@ class FloatingGuideService : Service() {
             browserView?.translationY = 0f
             attachBrowserIfNeeded()
             resizeBrowserToScreen()
-            restoreScrollWhenReady()
             bringBubbleToFront()
             return
         }
