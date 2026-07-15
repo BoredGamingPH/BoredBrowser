@@ -47,6 +47,7 @@ class FloatingGuideService : Service() {
     private var webView: WebView? = null
     private var browserParams: WindowManager.LayoutParams? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
+    private var browserAttached: Boolean = false
     private var lastUrl: String = DEFAULT_URL
     private var bubbleVisible: Boolean = true
     private var bubbleOpacity: Float = 1f
@@ -64,7 +65,7 @@ class FloatingGuideService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent?.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() }?.let {
+        intent?.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() && browserView == null }?.let {
             lastUrl = normalizeUrl(it)
             prefs.edit().putString(KEY_LAST_URL, lastUrl).apply()
         }
@@ -90,7 +91,7 @@ class FloatingGuideService : Service() {
 
     override fun onDestroy() {
         isRunning = false
-        hideBrowser(returnToBubble = false)
+        hideBrowser(returnToBubble = false, destroy = true)
         removeBubble()
         hideCloseTarget()
         super.onDestroy()
@@ -122,14 +123,17 @@ class FloatingGuideService : Service() {
             }
         }
 
+        val size = bubbleSize()
+        val savedX = prefs.getInt(KEY_BUBBLE_X, screenWidth() - size - sdp(8))
+        val savedY = prefs.getInt(KEY_BUBBLE_Y, sdp(8))
         val params = WindowManager.LayoutParams(
-            bubbleSize(), bubbleSize(), overlayType(),
+            size, size, overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = prefs.getInt(KEY_BUBBLE_X, screenWidth() - bubbleSize() - sdp(8))
-            y = prefs.getInt(KEY_BUBBLE_Y, sdp(8))
+            x = clampToScreen(savedX, size, screenWidth())
+            y = clampToScreen(savedY, size, screenHeight())
         }
 
         attachDrag(bubble, params, snap = true)
@@ -141,11 +145,10 @@ class FloatingGuideService : Service() {
     private fun showBrowser(url: String) {
         if (!Settings.canDrawOverlays(this)) return
         showBubble()
-        dockBubbleAtTop()
         if (browserView != null) {
             browserView?.visibility = View.VISIBLE
             resizeBrowserToScreen()
-            webView?.loadUrl(normalizeUrl(url))
+            attachBrowserIfNeeded()
             bringBubbleToFront()
             return
         }
@@ -220,6 +223,7 @@ class FloatingGuideService : Service() {
         browserView = container
         browserParams = params
         windowManager.addView(container, params)
+        browserAttached = true
         bringBubbleToFront()
     }
 
@@ -230,8 +234,19 @@ class FloatingGuideService : Service() {
         params.height = browserHeight()
         params.x = 0
         params.y = 0
-        runCatching { windowManager.updateViewLayout(view, params) }
+        if (browserAttached) {
+            runCatching { windowManager.updateViewLayout(view, params) }
+        }
     }
+
+    private fun attachBrowserIfNeeded() {
+        val view = browserView ?: return
+        val params = browserParams ?: return
+        if (browserAttached) return
+        runCatching { windowManager.addView(view, params) }
+            .onSuccess { browserAttached = true }
+    }
+
     private fun openLauncher() {
         hideBrowser(returnToBubble = true)
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -241,29 +256,27 @@ class FloatingGuideService : Service() {
     }
 
     private fun toggleBrowser() {
-        if (browserView == null) {
+        if (browserView == null || !browserAttached) {
             showBrowser(lastUrl)
         } else {
             hideBrowser(returnToBubble = false)
         }
     }
 
-    private fun hideBrowser(returnToBubble: Boolean = true) {
+    private fun hideBrowser(returnToBubble: Boolean = true, destroy: Boolean = false) {
         browserView?.let {
-            runCatching { windowManager.removeView(it) }
+            if (browserAttached) {
+                runCatching { windowManager.removeView(it) }
+                browserAttached = false
+            }
         }
-        browserView = null
-        webView?.destroy()
-        webView = null
+        if (destroy) {
+            browserView = null
+            webView?.destroy()
+            webView = null
+            browserParams = null
+        }
         if (returnToBubble) showBubble()
-    }
-
-    private fun dockBubbleAtTop() {
-        val params = bubbleParams ?: return
-        params.x = max(sdp(8), screenWidth() - params.width - sdp(8))
-        params.y = sdp(8)
-        prefs.edit().putInt(KEY_BUBBLE_X, params.x).putInt(KEY_BUBBLE_Y, params.y).apply()
-        bubbleView?.let { runCatching { windowManager.updateViewLayout(it, params) } }
     }
 
     private fun bringBubbleToFront() {

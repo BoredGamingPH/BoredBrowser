@@ -14,7 +14,6 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen>
     with WidgetsBindingObserver {
-  static const _startUrl = 'https://www.google.com';
   static const _autoLaunchKey = 'auto_launch_floating_browser';
   static const _showBubbleKey = 'show_bubble_icon';
   static const _kofiUrl = 'https://ko-fi.com/boredgamingph';
@@ -328,7 +327,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
     setState(() => _status = 'Opening floating browser...');
     final started = await overlay.showFloatingBrowser(
-      url: _startUrl,
       showBubble: _showBubbleIcon,
       bubbleOpacity: _bubbleOpacity,
     );
