@@ -13,7 +13,6 @@ The project is intentionally local-first and simple. There are no cloud features
 - Launcher controls for overlay permission, auto-launch, bubble visibility, and opacity
 - Browser toolbar with Home, address/search field, and a compact three-dot menu
 - Three-dot menu actions: Back, Forward, Reload, Donate, and Launcher
-- Ko-fi support link in both the launcher and floating browser menu
 - Adaptive Android launcher icon and custom floating bubble icon
 
 ## Project Structure
@@ -64,12 +63,19 @@ BoredBrowser uses:
 
 The app asks the user to grant overlay permission before starting the floating browser.
 
+## Future Features
+- PDF loading if you have pdf guides
+- Saving Web Pages
+- Creating Collections for Game guides
+- No need for RA i think because you can just open the site, but I will add shortcuts to it in the browser options too
+  
 ## Branding
 
 Source logo files live in `assets/branding/`. Android launcher and bubble resources are generated into `android/app/src/main/res/`.
 
-## Notes For Releases
+## Ko-Fi
+https://ko-fi.com/boredgamingph
 
-This repository is source code only. Build outputs are ignored by git. Upload APKs through GitHub Releases rather than committing them to the repository.
-
-Before a public release, replace the debug signing configuration with a real release keystore.
+## AI Disclaimer
+Current usages of AI is the generation of the Icons, UX designing and refinement
+and translation of this git Readme for grammar correction and conciseness
