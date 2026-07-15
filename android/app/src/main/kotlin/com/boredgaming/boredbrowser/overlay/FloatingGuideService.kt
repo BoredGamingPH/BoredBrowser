@@ -13,6 +13,7 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
@@ -21,6 +22,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebChromeClient
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
@@ -47,8 +49,11 @@ class FloatingGuideService : Service() {
     private var webView: WebView? = null
     private var browserParams: WindowManager.LayoutParams? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
+    private var webState: Bundle? = null
     private var browserAttached: Boolean = false
     private var lastUrl: String = DEFAULT_URL
+    private var lastScrollX: Int = 0
+    private var lastScrollY: Int = 0
     private var bubbleVisible: Boolean = true
     private var bubbleOpacity: Float = 1f
 
@@ -58,6 +63,8 @@ class FloatingGuideService : Service() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         lastUrl = prefs.getString(KEY_LAST_URL, DEFAULT_URL) ?: DEFAULT_URL
+        lastScrollX = prefs.getInt(KEY_SCROLL_X, 0)
+        lastScrollY = prefs.getInt(KEY_SCROLL_Y, 0)
         bubbleVisible = prefs.getBoolean(KEY_SHOW_BUBBLE, true)
         bubbleOpacity = prefs.getFloat(KEY_BUBBLE_OPACITY, 1f).coerceIn(MIN_BUBBLE_OPACITY, 1f)
         createNotificationChannel()
@@ -149,6 +156,7 @@ class FloatingGuideService : Service() {
             browserView?.visibility = View.VISIBLE
             resizeBrowserToScreen()
             attachBrowserIfNeeded()
+            restoreScrollWhenReady()
             bringBubbleToFront()
             return
         }
@@ -186,20 +194,34 @@ class FloatingGuideService : Service() {
         val web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            settings.databaseEnabled = true
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
             settings.setSupportZoom(true)
             settings.builtInZoomControls = true
             settings.displayZoomControls = false
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
                     pageUrl?.let {
+                        val previousUrl = lastUrl
                         lastUrl = it
-                        prefs.edit().putString(KEY_LAST_URL, it).apply()
+                        if (previousUrl != it) {
+                            lastScrollX = 0
+                            lastScrollY = 0
+                        }
+                        prefs.edit()
+                            .putString(KEY_LAST_URL, it)
+                            .putInt(KEY_SCROLL_X, lastScrollX)
+                            .putInt(KEY_SCROLL_Y, lastScrollY)
+                            .apply()
                         address.setText(it)
+                        restoreScrollWhenReady()
                     }
                 }
             }
             webChromeClient = WebChromeClient()
-            loadUrl(normalizeUrl(url))
+            if (webState?.let { restoreState(it) != null } != true) {
+                loadUrl(normalizeUrl(url))
+            }
         }
         webView = web
 
@@ -264,6 +286,7 @@ class FloatingGuideService : Service() {
     }
 
     private fun hideBrowser(returnToBubble: Boolean = true, destroy: Boolean = false) {
+        saveBrowserState()
         browserView?.let {
             if (browserAttached) {
                 runCatching { windowManager.removeView(it) }
@@ -277,6 +300,26 @@ class FloatingGuideService : Service() {
             browserParams = null
         }
         if (returnToBubble) showBubble()
+    }
+
+    private fun saveBrowserState() {
+        webView?.let { web ->
+            lastUrl = web.url ?: lastUrl
+            lastScrollX = web.scrollX
+            lastScrollY = web.scrollY
+            webState = Bundle().also { web.saveState(it) }
+            prefs.edit()
+                .putString(KEY_LAST_URL, lastUrl)
+                .putInt(KEY_SCROLL_X, lastScrollX)
+                .putInt(KEY_SCROLL_Y, lastScrollY)
+                .apply()
+        }
+    }
+
+    private fun restoreScrollWhenReady() {
+        webView?.postDelayed({
+            webView?.scrollTo(lastScrollX, lastScrollY)
+        }, SCROLL_RESTORE_DELAY_MS)
     }
 
     private fun bringBubbleToFront() {
@@ -575,10 +618,13 @@ class FloatingGuideService : Service() {
         private const val KEY_LAST_URL = "last_url"
         private const val KEY_BUBBLE_X = "bubble_x"
         private const val KEY_BUBBLE_Y = "bubble_y"
+        private const val KEY_SCROLL_X = "scroll_x"
+        private const val KEY_SCROLL_Y = "scroll_y"
         private const val KEY_SHOW_BUBBLE = "show_bubble"
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
         private const val MIN_BUBBLE_OPACITY = 0.10f
         private const val HIDDEN_BUBBLE_OPACITY = 0.10f
+        private const val SCROLL_RESTORE_DELAY_MS = 250L
         private const val DEFAULT_URL = "https://www.google.com"
         private const val KOFI_URL = "https://ko-fi.com/boredgamingph"
     }
