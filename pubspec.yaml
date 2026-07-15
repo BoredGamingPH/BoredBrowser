@@ -1,0 +1,21 @@
+name: boredbrowser
+description: "A lightweight Android floating browser with a draggable chat-head style bubble."
+publish_to: 'none'
+version: 1.0.0+2
+
+environment:
+  sdk: ^3.12.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.6.1
+  shared_preferences: ^2.5.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

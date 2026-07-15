@@ -1,0 +1,39 @@
+# Dart / Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+coverage/
+
+# Android / Gradle
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/app/build/
+android/app/debug/
+android/app/profile/
+android/app/release/
+
+# Generated release artifacts
+*.apk
+*.aab
+app.*.symbols
+app.*.map.json
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+
+# Local notes
+.env
+.env.*
