@@ -17,6 +17,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -78,7 +79,6 @@ class FloatingGuideService : Service() {
                 lastUrl = pageUrl
                 lastScrollX = x.coerceAtLeast(0)
                 lastScrollY = y.coerceAtLeast(0)
-                persistScroll(pageUrl, lastScrollX, lastScrollY)
             }
         }
     }
@@ -193,6 +193,15 @@ class FloatingGuideService : Service() {
             orientation = LinearLayout.VERTICAL
             background = roundedDrawable(0xFF1D2128.toInt(), 0xFF31353D.toInt(), sdp(8).toFloat())
             elevation = sdp(10).toFloat()
+            isFocusableInTouchMode = true
+            setOnKeyListener { _, keyCode, event ->
+                if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+                    handleBrowserBack(webView)
+                    true
+                } else {
+                    false
+                }
+            }
         }
 
         val titleBar = LinearLayout(this).apply {
@@ -256,7 +265,8 @@ class FloatingGuideService : Service() {
         webView = web
 
         titleBar.addView(iconButton("⌂") { web.loadUrl(DEFAULT_URL) })
-        titleBar.addView(address, LinearLayout.LayoutParams(0, toolbarButtonSize(), 1f).apply { marginStart = sdp(4); marginEnd = sdp(4) })
+        titleBar.addView(iconButton("‹") { handleBrowserBack(web) })
+        titleBar.addView(address, LinearLayout.LayoutParams(0, toolbarButtonSize(), 0.72f).apply { marginStart = sdp(4); marginEnd = sdp(4) })
         titleBar.addView(menuButton("⋮") { anchor -> showToolbarMenu(anchor, web) })
 
         container.addView(titleBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, toolbarHeight()))
@@ -308,6 +318,13 @@ class FloatingGuideService : Service() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
         startActivity(intent)
+    }
+
+    private fun handleBrowserBack(web: WebView?) {
+        when {
+            web?.canGoBack() == true -> web.goBack()
+            browserAttached && !browserMinimized -> hideBrowser(returnToBubble = false)
+        }
     }
 
     private fun toggleBrowser() {
@@ -679,7 +696,6 @@ class FloatingGuideService : Service() {
             menu.addView(item, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
         }
 
-        addMenuItem("Back", "Go back") { if (web.canGoBack()) web.goBack() }
         addMenuItem("Forward", "Go forward") { if (web.canGoForward()) web.goForward() }
         addMenuItem("Reload", "Reload page") { web.reload() }
         addMenuItem("History", "Open browsing history") { showHistoryPopup(anchor, web) }
