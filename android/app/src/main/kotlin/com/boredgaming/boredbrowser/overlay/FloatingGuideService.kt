@@ -24,6 +24,8 @@ import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebChromeClient
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -40,6 +42,7 @@ import com.boredgaming.boredbrowser.MainActivity
 import com.boredgaming.boredbrowser.R
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -68,6 +71,7 @@ class FloatingGuideService : Service() {
     private var lastScrollY: Int = 0
     private var bubbleVisible: Boolean = true
     private var bubbleOpacity: Float = 1f
+    private var adBlockEnabled: Boolean = true
 
     private inner class ScrollBridge {
         @JavascriptInterface
@@ -93,6 +97,7 @@ class FloatingGuideService : Service() {
         lastScrollY = prefs.getInt(KEY_SCROLL_Y, 0)
         bubbleVisible = prefs.getBoolean(KEY_SHOW_BUBBLE, true)
         bubbleOpacity = prefs.getFloat(KEY_BUBBLE_OPACITY, 1f).coerceIn(MIN_BUBBLE_OPACITY, 1f)
+        adBlockEnabled = prefs.getBoolean(KEY_AD_BLOCK_ENABLED, true)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification())
     }
@@ -237,6 +242,10 @@ class FloatingGuideService : Service() {
             settings.builtInZoomControls = true
             settings.displayZoomControls = false
             webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                    return if (shouldBlockRequest(request)) emptyBlockedResponse() else null
+                }
+
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
                     pageUrl?.let {
                         val previousUrl = lastUrl
@@ -698,6 +707,12 @@ class FloatingGuideService : Service() {
 
         addMenuItem("Forward", "Go forward") { if (web.canGoForward()) web.goForward() }
         addMenuItem("Reload", "Reload page") { web.reload() }
+        addMenuItem(if (adBlockEnabled) "Ad Blocker: On" else "Ad Blocker: Off", "Toggle built-in ad blocker") {
+            adBlockEnabled = !adBlockEnabled
+            prefs.edit().putBoolean(KEY_AD_BLOCK_ENABLED, adBlockEnabled).apply()
+            Toast.makeText(this, if (adBlockEnabled) "Ad blocker on" else "Ad blocker off", Toast.LENGTH_SHORT).show()
+            web.reload()
+        }
         addMenuItem("History", "Open browsing history") { showHistoryPopup(anchor, web) }
         addMenuItem("☕ Donate", "Support BoredBrowser on Ko-fi") { web.loadUrl(KOFI_URL) }
         addMenuItem("Launcher", "Open BoredBrowser launcher") { openLauncher() }
@@ -833,6 +848,25 @@ class FloatingGuideService : Service() {
         else -> label
     }
 
+    private fun shouldBlockRequest(request: WebResourceRequest?): Boolean {
+        if (!adBlockEnabled || request == null || request.isForMainFrame) return false
+        val uri = request.url ?: return false
+        val host = uri.host?.lowercase() ?: return false
+        val url = uri.toString().lowercase()
+        if (AD_HOSTS.any { host == it || host.endsWith(".$it") }) return true
+        return AD_URL_PARTS.any { url.contains(it) }
+    }
+
+    private fun emptyBlockedResponse(): WebResourceResponse =
+        WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            204,
+            "No Content",
+            mapOf("Access-Control-Allow-Origin" to "*"),
+            ByteArrayInputStream(ByteArray(0)),
+        )
+
     private fun notification(): Notification {
         val openIntent = PendingIntent.getActivity(
             this, 1, Intent(this, MainActivity::class.java), pendingFlags()
@@ -938,6 +972,7 @@ class FloatingGuideService : Service() {
         private const val KEY_SCROLL_Y = "scroll_y"
         private const val KEY_SCROLL_BY_URL = "scroll_by_url"
         private const val KEY_HISTORY = "browser_history"
+        private const val KEY_AD_BLOCK_ENABLED = "ad_block_enabled"
         private const val KEY_SHOW_BUBBLE = "show_bubble"
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
         private const val MIN_BUBBLE_OPACITY = 0.10f
@@ -949,6 +984,49 @@ class FloatingGuideService : Service() {
         private const val HISTORY_MENU_LIMIT = 12
         private const val DEFAULT_URL = "https://www.google.com"
         private const val KOFI_URL = "https://ko-fi.com/boredgamingph"
+        private val AD_HOSTS = setOf(
+            "2mdn.net",
+            "adform.net",
+            "adnxs.com",
+            "adsafeprotected.com",
+            "adsrvr.org",
+            "amazon-adsystem.com",
+            "app-measurement.com",
+            "casalemedia.com",
+            "criteo.com",
+            "criteo.net",
+            "doubleclick.net",
+            "facebook.net",
+            "google-analytics.com",
+            "googleadservices.com",
+            "googlesyndication.com",
+            "googletagmanager.com",
+            "googletagservices.com",
+            "hotjar.com",
+            "moatads.com",
+            "outbrain.com",
+            "scorecardresearch.com",
+            "taboola.com",
+        )
+        private val AD_URL_PARTS = listOf(
+            "/ads/",
+            "/adserver/",
+            "/advertising/",
+            "/analytics.js",
+            "/banner-ad",
+            "/banners/",
+            "/collect?",
+            "/doubleclick/",
+            "/gampad/",
+            "/pagead/",
+            "/pixel?",
+            "/popunder",
+            "/prebid",
+            "/sponsored/",
+            "adservice",
+            "adserver",
+            "googleads",
+        )
     }
 }
 
