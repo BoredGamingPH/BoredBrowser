@@ -55,15 +55,29 @@ class FloatingGuideService : Service() {
         val visitCount: Int,
     )
 
+    private data class BrowserTab(
+        val id: Int,
+        val webView: WebView,
+        var title: String,
+        var url: String,
+        var scrollX: Int = 0,
+        var scrollY: Int = 0,
+    )
+
     private lateinit var windowManager: WindowManager
     private lateinit var prefs: SharedPreferences
     private var bubbleView: View? = null
     private var browserView: View? = null
     private var closeTargetView: TextView? = null
     private var webView: WebView? = null
+    private var browserContentView: FrameLayout? = null
+    private var addressBar: EditText? = null
     private var browserParams: WindowManager.LayoutParams? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var webState: Bundle? = null
+    private val tabs = mutableListOf<BrowserTab>()
+    private var activeTabIndex: Int = -1
+    private var nextTabId: Int = 1
     private var browserAttached: Boolean = false
     private var browserMinimized: Boolean = false
     private var lastUrl: String = DEFAULT_URL
@@ -83,6 +97,11 @@ class FloatingGuideService : Service() {
                 lastUrl = pageUrl
                 lastScrollX = x.coerceAtLeast(0)
                 lastScrollY = y.coerceAtLeast(0)
+                activeTab()?.let { tab ->
+                    tab.url = pageUrl
+                    tab.scrollX = lastScrollX
+                    tab.scrollY = lastScrollY
+                }
             }
         }
     }
@@ -232,54 +251,22 @@ class FloatingGuideService : Service() {
                 true
             }
         }
+        addressBar = address
 
-        val web = WebView(this).apply {
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.databaseEnabled = true
-            settings.cacheMode = WebSettings.LOAD_DEFAULT
-            settings.setSupportZoom(true)
-            settings.builtInZoomControls = true
-            settings.displayZoomControls = false
-            webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                    return if (shouldBlockRequest(request)) emptyBlockedResponse() else null
-                }
+        val content = FrameLayout(this)
+        browserContentView = content
+        restoreSavedTabs(url)
+        if (tabs.isEmpty()) createTab(url)
+        switchToTab(prefs.getInt(KEY_ACTIVE_TAB, 0).coerceIn(0, tabs.lastIndex))
 
-                override fun onPageFinished(view: WebView?, pageUrl: String?) {
-                    pageUrl?.let {
-                        val previousUrl = lastUrl
-                        lastUrl = it
-                        if (previousUrl != it) {
-                            restoreRememberedScrollFor(it)
-                        }
-                        prefs.edit()
-                            .putString(KEY_LAST_URL, it)
-                            .putInt(KEY_SCROLL_X, lastScrollX)
-                            .putInt(KEY_SCROLL_Y, lastScrollY)
-                            .apply()
-                        address.setText(it)
-                        installScrollBridge(view)
-                        recordHistory(it, view?.title)
-                        restoreScrollWhenReady()
-                    }
-                }
-            }
-            webChromeClient = WebChromeClient()
-            addJavascriptInterface(ScrollBridge(), SCROLL_BRIDGE_NAME)
-            if (webState?.let { restoreState(it) != null } != true) {
-                loadUrl(normalizeUrl(url))
-            }
-        }
-        webView = web
-
-        titleBar.addView(iconButton("⌂") { web.loadUrl(DEFAULT_URL) })
-        titleBar.addView(iconButton("‹") { handleBrowserBack(web) })
+        titleBar.addView(iconButton("⌂") { webView?.loadUrl(DEFAULT_URL) })
+        titleBar.addView(iconButton("‹") { handleBrowserBack(webView) })
         titleBar.addView(address, LinearLayout.LayoutParams(0, toolbarButtonSize(), 0.72f).apply { marginStart = sdp(4); marginEnd = sdp(4) })
-        titleBar.addView(menuButton("⋮") { anchor -> showToolbarMenu(anchor, web) })
+        titleBar.addView(menuButton("▣") { anchor -> showTabsPopup(anchor) })
+        titleBar.addView(menuButton("⋮") { anchor -> showToolbarMenu(anchor, webView) })
 
         container.addView(titleBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, toolbarHeight()))
-        container.addView(web, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        container.addView(content, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         val params = WindowManager.LayoutParams(
             browserWidth(), browserHeight(), overlayType(),
@@ -298,6 +285,154 @@ class FloatingGuideService : Service() {
         browserMinimized = false
         bringBubbleToFront()
     }
+
+    private fun createTab(initialUrl: String = DEFAULT_URL): BrowserTab {
+        val web = createWebView(initialUrl)
+        val tab = BrowserTab(nextTabId++, web, "New Tab", normalizeUrl(initialUrl))
+        tabs.add(tab)
+        browserContentView?.addView(web, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        web.visibility = View.GONE
+        saveTabs()
+        return tab
+    }
+
+    private fun createWebView(initialUrl: String): WebView =
+        WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.databaseEnabled = true
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            settings.setSupportZoom(true)
+            settings.builtInZoomControls = true
+            settings.displayZoomControls = false
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                    return if (shouldBlockRequest(request)) emptyBlockedResponse() else null
+                }
+
+                override fun onPageFinished(view: WebView?, pageUrl: String?) {
+                    pageUrl?.let {
+                        val previousUrl = lastUrl
+                        updateTabFor(view, it)
+                        if (isActiveWebView(view)) {
+                            lastUrl = it
+                            if (previousUrl != it) {
+                                restoreRememberedScrollFor(it)
+                            }
+                            prefs.edit()
+                                .putString(KEY_LAST_URL, it)
+                                .putInt(KEY_SCROLL_X, lastScrollX)
+                                .putInt(KEY_SCROLL_Y, lastScrollY)
+                                .apply()
+                            addressBar?.setText(it)
+                            installScrollBridge(view)
+                            recordHistory(it, view?.title)
+                            restoreScrollWhenReady()
+                        }
+                        saveTabs()
+                    }
+                }
+            }
+            webChromeClient = object : WebChromeClient() {
+                override fun onReceivedTitle(view: WebView?, title: String?) {
+                    super.onReceivedTitle(view, title)
+                    updateTabFor(view, title = title)
+                    saveTabs()
+                }
+            }
+            addJavascriptInterface(ScrollBridge(), SCROLL_BRIDGE_NAME)
+            if (webState?.let { restoreState(it) != null } != true) {
+                loadUrl(normalizeUrl(initialUrl))
+            }
+        }
+
+    private fun switchToTab(index: Int) {
+        if (index !in tabs.indices) return
+        saveBrowserState(saveBundle = false)
+        tabs.forEachIndexed { tabIndex, tab ->
+            tab.webView.visibility = if (tabIndex == index) View.VISIBLE else View.GONE
+        }
+        activeTabIndex = index
+        val active = tabs[index]
+        webView = active.webView
+        lastUrl = active.url
+        lastScrollX = active.scrollX
+        lastScrollY = active.scrollY
+        addressBar?.setText(active.url)
+        restoreScrollWhenReady()
+        saveTabs()
+    }
+
+    private fun closeTab(index: Int) {
+        if (index !in tabs.indices) return
+        val removed = tabs.removeAt(index)
+        browserContentView?.removeView(removed.webView)
+        removed.webView.destroy()
+        saveTabs()
+        if (tabs.isEmpty()) {
+            createTab(DEFAULT_URL)
+            switchToTab(0)
+            return
+        }
+        val nextIndex = when {
+            activeTabIndex > index -> activeTabIndex - 1
+            activeTabIndex >= tabs.size -> tabs.lastIndex
+            else -> activeTabIndex
+        }
+        switchToTab(nextIndex.coerceIn(0, tabs.lastIndex))
+    }
+
+    private fun newTab(url: String = DEFAULT_URL) {
+        if (tabs.size >= MAX_TABS) {
+            Toast.makeText(this, "Maximum tabs reached", Toast.LENGTH_SHORT).show()
+            return
+        }
+        createTab(url)
+        switchToTab(tabs.lastIndex)
+    }
+
+    private fun updateTabFor(view: WebView?, url: String? = null, title: String? = null) {
+        val tab = tabs.firstOrNull { it.webView == view } ?: return
+        url?.takeIf { it.isNotBlank() }?.let { tab.url = it }
+        title?.takeIf { it.isNotBlank() }?.let { tab.title = it }
+        if (isActiveWebView(view)) {
+            lastUrl = tab.url
+            addressBar?.setText(tab.url)
+        }
+    }
+
+    private fun restoreSavedTabs(fallbackUrl: String) {
+        val raw = prefs.getString(KEY_TABS, "[]") ?: "[]"
+        val savedUrls = runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index -> array.optJSONObject(index)?.optString("url").orEmpty() }
+                .filter { it.isNotBlank() }
+                .take(MAX_TABS)
+        }.getOrDefault(emptyList())
+        val urls = savedUrls.ifEmpty { listOf(fallbackUrl) }
+        urls.forEach { createTab(it) }
+    }
+
+    private fun saveTabs() {
+        val array = JSONArray()
+        tabs.forEach { tab ->
+            array.put(JSONObject().apply {
+                put("id", tab.id)
+                put("title", tab.title)
+                put("url", tab.url)
+                put("scrollX", tab.scrollX)
+                put("scrollY", tab.scrollY)
+            })
+        }
+        prefs.edit()
+            .putString(KEY_TABS, array.toString())
+            .putInt(KEY_ACTIVE_TAB, activeTabIndex.coerceAtLeast(0))
+            .apply()
+    }
+
+    private fun activeTab(): BrowserTab? = tabs.getOrNull(activeTabIndex)
+
+    private fun isActiveWebView(view: WebView?): Boolean = view != null && activeTab()?.webView == view
 
     private fun resizeBrowserToScreen() {
         val view = browserView ?: return
@@ -354,9 +489,13 @@ class FloatingGuideService : Service() {
                 }
             }
             browserView = null
-            webView?.destroy()
+            tabs.forEach { it.webView.destroy() }
+            tabs.clear()
             webView = null
             browserParams = null
+            browserContentView = null
+            addressBar = null
+            activeTabIndex = -1
             browserMinimized = false
         } else {
             minimizeBrowserWindow()
@@ -392,7 +531,13 @@ class FloatingGuideService : Service() {
             if (saveBundle) {
                 webState = Bundle().also { web.saveState(it) }
             }
+            activeTab()?.takeIf { it.webView == web }?.let { tab ->
+                tab.url = lastUrl
+                tab.scrollX = lastScrollX
+                tab.scrollY = lastScrollY
+            }
             persistScroll(lastUrl, lastScrollX, lastScrollY)
+            saveTabs()
             capturePageScroll(web)
         }
     }
@@ -460,7 +605,13 @@ class FloatingGuideService : Service() {
                 lastUrl = pageUrl
                 lastScrollX = json.optInt("x", lastScrollX).coerceAtLeast(0)
                 lastScrollY = capturedY
+                activeTab()?.takeIf { it.webView == web }?.let { tab ->
+                    tab.url = pageUrl
+                    tab.scrollX = lastScrollX
+                    tab.scrollY = lastScrollY
+                }
                 persistScroll(pageUrl, lastScrollX, lastScrollY)
+                saveTabs()
             }
         }
     }
@@ -676,7 +827,70 @@ class FloatingGuideService : Service() {
         }
     }
 
-    private fun showToolbarMenu(anchor: View, web: WebView) {
+    private fun showTabsPopup(anchor: View) {
+        lateinit var popup: PopupWindow
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF3A404B.toInt(), sdp(8).toFloat())
+            setPadding(sdp(6), sdp(6), sdp(6), sdp(6))
+        }
+
+        val newTab = TextView(this).apply {
+            text = "+ New Tab"
+            contentDescription = "Open a new tab"
+            textSize = scaledSp(14f)
+            setTextColor(Color.WHITE)
+            setPadding(sdp(12), sdp(10), sdp(12), sdp(10))
+            minWidth = tabsMenuWidth()
+            setOnClickListener {
+                popup.dismiss()
+                newTab()
+            }
+        }
+        menu.addView(newTab, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+
+        tabs.forEachIndexed { index, tab ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = roundedDrawable(if (index == activeTabIndex) 0xFF313844.toInt() else 0x00252A33, 0x0031353D, sdp(6).toFloat())
+            }
+            val title = TextView(this).apply {
+                text = "${if (index == activeTabIndex) "* " else ""}${tab.title.ifBlank { tab.url }}"
+                contentDescription = "Switch to tab ${index + 1}"
+                textSize = scaledSp(13f)
+                setTextColor(Color.WHITE)
+                setSingleLine(true)
+                setPadding(sdp(10), 0, sdp(8), 0)
+                setOnClickListener {
+                    popup.dismiss()
+                    switchToTab(index)
+                }
+            }
+            val close = TextView(this).apply {
+                text = "×"
+                contentDescription = "Close tab ${index + 1}"
+                gravity = Gravity.CENTER
+                textSize = scaledSp(18f)
+                setTextColor(0xFFFFD0C8.toInt())
+                setOnClickListener {
+                    popup.dismiss()
+                    closeTab(index)
+                }
+            }
+            row.addView(title, LinearLayout.LayoutParams(0, menuItemHeight(), 1f))
+            row.addView(close, LinearLayout.LayoutParams(menuItemHeight(), menuItemHeight()))
+            menu.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+        }
+
+        popup = PopupWindow(menu, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
+            isOutsideTouchable = true
+            elevation = sdp(8).toFloat()
+        }
+        popup.showAsDropDown(anchor, -tabsMenuHorizontalOffset(), sdp(4))
+    }
+
+    private fun showToolbarMenu(anchor: View, web: WebView?) {
         lateinit var popup: PopupWindow
         val menu = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -705,16 +919,16 @@ class FloatingGuideService : Service() {
             menu.addView(item, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
         }
 
-        addMenuItem("Forward", "Go forward") { if (web.canGoForward()) web.goForward() }
-        addMenuItem("Reload", "Reload page") { web.reload() }
+        addMenuItem("Forward", "Go forward") { if (web?.canGoForward() == true) web.goForward() }
+        addMenuItem("Reload", "Reload page") { web?.reload() }
         addMenuItem(if (adBlockEnabled) "Ad Blocker: On" else "Ad Blocker: Off", "Toggle built-in ad blocker") {
             adBlockEnabled = !adBlockEnabled
             prefs.edit().putBoolean(KEY_AD_BLOCK_ENABLED, adBlockEnabled).apply()
             Toast.makeText(this, if (adBlockEnabled) "Ad blocker on" else "Ad blocker off", Toast.LENGTH_SHORT).show()
-            web.reload()
+            web?.reload()
         }
         addMenuItem("History", "Open browsing history") { showHistoryPopup(anchor, web) }
-        addMenuItem("☕ Donate", "Support BoredBrowser on Ko-fi") { web.loadUrl(KOFI_URL) }
+        addMenuItem("☕ Donate", "Support BoredBrowser on Ko-fi") { web?.loadUrl(KOFI_URL) }
         addMenuItem("Launcher", "Open BoredBrowser launcher") { openLauncher() }
 
         popup = PopupWindow(menu, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
@@ -724,7 +938,7 @@ class FloatingGuideService : Service() {
         popup.showAsDropDown(anchor, -menuHorizontalOffset(), sdp(4))
     }
 
-    private fun showHistoryPopup(anchor: View, web: WebView) {
+    private fun showHistoryPopup(anchor: View, web: WebView?) {
         lateinit var popup: PopupWindow
         val history = loadHistoryEntries()
         val menu = LinearLayout(this).apply {
@@ -763,7 +977,7 @@ class FloatingGuideService : Service() {
                     background = roundedDrawable(0x00252A33, 0x0031353D, sdp(6).toFloat())
                     setOnClickListener {
                         popup.dismiss()
-                        web.loadUrl(entry.url)
+                        web?.loadUrl(entry.url)
                     }
                     setOnLongClickListener {
                         Toast.makeText(this@FloatingGuideService, entry.url, Toast.LENGTH_SHORT).show()
@@ -845,6 +1059,7 @@ class FloatingGuideService : Service() {
         "↻" -> "Reload page"
         "⌂" -> "Open home page"
         "⋮" -> "Open browser actions"
+        "▣" -> "Open tabs"
         else -> label
     }
 
@@ -929,6 +1144,8 @@ class FloatingGuideService : Service() {
     private fun menuItemHeight(): Int = sdp(42).coerceIn(dp(38), dp(52))
     private fun menuMinWidth(): Int = sdp(148).coerceIn(dp(128), dp(190))
     private fun menuHorizontalOffset(): Int = sdp(116).coerceIn(dp(96), dp(160))
+    private fun tabsMenuWidth(): Int = sdp(240).coerceIn(dp(200), dp(320))
+    private fun tabsMenuHorizontalOffset(): Int = sdp(206).coerceIn(dp(160), dp(270))
     private fun historyMenuWidth(): Int = sdp(230).coerceIn(dp(190), dp(300))
     private fun historyMenuHorizontalOffset(): Int = sdp(198).coerceIn(dp(150), dp(250))
     private fun browserWindowFlags(minimized: Boolean): Int =
@@ -972,6 +1189,8 @@ class FloatingGuideService : Service() {
         private const val KEY_SCROLL_Y = "scroll_y"
         private const val KEY_SCROLL_BY_URL = "scroll_by_url"
         private const val KEY_HISTORY = "browser_history"
+        private const val KEY_TABS = "browser_tabs"
+        private const val KEY_ACTIVE_TAB = "active_tab"
         private const val KEY_AD_BLOCK_ENABLED = "ad_block_enabled"
         private const val KEY_SHOW_BUBBLE = "show_bubble"
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
@@ -982,6 +1201,7 @@ class FloatingGuideService : Service() {
         private const val SCROLL_RESTORE_ATTEMPTS = 16
         private const val MAX_HISTORY_ENTRIES = 100
         private const val HISTORY_MENU_LIMIT = 12
+        private const val MAX_TABS = 4
         private const val DEFAULT_URL = "https://www.google.com"
         private const val KOFI_URL = "https://ko-fi.com/boredgamingph"
         private val AD_HOSTS = setOf(
