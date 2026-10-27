@@ -45,6 +45,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -100,6 +101,10 @@ class FloatingGuideService : Service() {
     private var nextTabId: Int = 1
     private var browserAttached: Boolean = false
     private var browserMinimized: Boolean = false
+    private var floatingWindow: Boolean = false
+    private var browserOpacity: Float = 1f
+    private var browserFocusable: Boolean = true
+    private var windowGrip: View? = null
     private var lastUrl: String = DEFAULT_URL
     private var lastScrollX: Int = 0
     private var lastScrollY: Int = 0
@@ -138,6 +143,8 @@ class FloatingGuideService : Service() {
         bubbleVisible = prefs.getBoolean(KEY_SHOW_BUBBLE, true)
         bubbleOpacity = prefs.getFloat(KEY_BUBBLE_OPACITY, 1f).coerceIn(MIN_BUBBLE_OPACITY, 1f)
         adBlockEnabled = prefs.getBoolean(KEY_AD_BLOCK_ENABLED, true)
+        floatingWindow = prefs.getBoolean(KEY_FLOATING_WINDOW, false)
+        browserOpacity = prefs.getFloat(KEY_BROWSER_OPACITY, 1f).coerceIn(MIN_BROWSER_OPACITY, 1f)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification())
     }
@@ -229,12 +236,23 @@ class FloatingGuideService : Service() {
             browserView?.translationX = 0f
             browserView?.translationY = 0f
             attachBrowserIfNeeded()
-            resizeBrowserToScreen()
+            applyBrowserWindowLayout()
             bringBubbleToFront()
             return
         }
 
-        val container = LinearLayout(this).apply {
+        val container = object : LinearLayout(this) {
+            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_OUTSIDE -> {
+                        releaseBrowserFocus()
+                        return true
+                    }
+                    MotionEvent.ACTION_DOWN -> regainBrowserFocus()
+                }
+                return super.dispatchTouchEvent(event)
+            }
+        }.apply {
             orientation = LinearLayout.VERTICAL
             background = roundedDrawable(0xFF1D2128.toInt(), 0xFF31353D.toInt(), sdp(8).toFloat())
             elevation = sdp(10).toFloat()
@@ -290,6 +308,7 @@ class FloatingGuideService : Service() {
         container.addView(titleBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, toolbarHeight()))
         container.addView(createFindBar(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, toolbarHeight()))
         container.addView(content, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        container.addView(createWindowGrip(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, windowGripHeight()))
 
         val params = WindowManager.LayoutParams(
             browserWidth(), browserHeight(), overlayType(),
@@ -297,12 +316,12 @@ class FloatingGuideService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 0
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
         browserView = container
         browserParams = params
+        browserFocusable = true
+        updateBrowserBounds(params)
         windowManager.addView(container, params)
         browserAttached = true
         browserMinimized = false
@@ -567,18 +586,186 @@ class FloatingGuideService : Service() {
 
     private fun isActiveWebView(view: WebView?): Boolean = view != null && activeTab()?.webView == view
 
-    private fun resizeBrowserToScreen() {
+    private fun applyBrowserWindowLayout() {
         val view = browserView ?: return
         val params = browserParams ?: return
-        params.width = browserWidth()
-        params.height = browserHeight()
-        params.x = 0
-        params.y = 0
-        params.flags = browserWindowFlags(minimized = false)
         browserMinimized = false
+        browserFocusable = true
+        updateBrowserBounds(params)
         if (browserAttached) {
             runCatching { windowManager.updateViewLayout(view, params) }
         }
+    }
+
+    // Sets size, position, flags and opacity for the open browser window in its current mode.
+    private fun updateBrowserBounds(params: WindowManager.LayoutParams) {
+        if (floatingWindow) {
+            val screenW = screenWidth()
+            val screenH = screenHeight()
+            params.width = prefs.getInt(KEY_WINDOW_WIDTH, (screenW * 0.92f).roundToInt()).coerceIn(minWindowWidth(), screenW)
+            params.height = prefs.getInt(KEY_WINDOW_HEIGHT, (screenH * 0.55f).roundToInt()).coerceIn(minWindowHeight(), screenH)
+            params.x = clampToScreen(prefs.getInt(KEY_WINDOW_X, (screenW - params.width) / 2), params.width, screenW)
+            params.y = clampToScreen(prefs.getInt(KEY_WINDOW_Y, (screenH * 0.06f).roundToInt()), params.height, screenH)
+        } else {
+            params.width = browserWidth()
+            params.height = browserHeight()
+            params.x = 0
+            params.y = 0
+        }
+        params.flags = browserWindowFlags(minimized = false)
+        params.alpha = browserOpacity
+        windowGrip?.visibility = if (floatingWindow) View.VISIBLE else View.GONE
+    }
+
+    private fun updateBrowserWindow() {
+        val view = browserView ?: return
+        val params = browserParams ?: return
+        if (browserAttached) runCatching { windowManager.updateViewLayout(view, params) }
+    }
+
+    // In floating mode, tapping the app behind hands it keyboard and Back key focus.
+    private fun releaseBrowserFocus() {
+        if (!floatingWindow || browserMinimized || !browserFocusable) return
+        browserFocusable = false
+        addressBar?.let { hideKeyboard(it) }
+        browserParams?.flags = browserWindowFlags(minimized = false)
+        updateBrowserWindow()
+    }
+
+    private fun regainBrowserFocus() {
+        if (browserFocusable || browserMinimized) return
+        browserFocusable = true
+        browserParams?.flags = browserWindowFlags(minimized = false)
+        updateBrowserWindow()
+    }
+
+    private fun createWindowGrip(): View {
+        val grip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(0xFF14161B.toInt())
+            visibility = if (floatingWindow) View.VISIBLE else View.GONE
+        }
+        val move = TextView(this).apply {
+            text = "═══"
+            contentDescription = "Drag to move the browser window"
+            gravity = Gravity.CENTER
+            textSize = scaledSp(12f)
+            setTextColor(0xFFA9ADB5.toInt())
+        }
+        val resize = TextView(this).apply {
+            text = "◢"
+            contentDescription = "Drag to resize the browser window"
+            gravity = Gravity.CENTER
+            textSize = scaledSp(16f)
+            setTextColor(0xFFA9ADB5.toInt())
+        }
+        grip.addView(View(this), LinearLayout.LayoutParams(windowGripHeight() * 2, LinearLayout.LayoutParams.MATCH_PARENT))
+        grip.addView(move, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        grip.addView(resize, LinearLayout.LayoutParams(windowGripHeight() * 2, LinearLayout.LayoutParams.MATCH_PARENT))
+        attachWindowDrag(move, resize = false)
+        attachWindowDrag(resize, resize = true)
+        windowGrip = grip
+        return grip
+    }
+
+    private fun attachWindowDrag(handle: View, resize: Boolean) {
+        var startX = 0
+        var startY = 0
+        var startW = 0
+        var startH = 0
+        var downX = 0f
+        var downY = 0f
+        handle.setOnTouchListener { _, event ->
+            val params = browserParams ?: return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startX = params.x
+                    startY = params.y
+                    startW = params.width
+                    startH = params.height
+                    downX = event.rawX
+                    downY = event.rawY
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - downX).toInt()
+                    val dy = (event.rawY - downY).toInt()
+                    if (resize) {
+                        params.width = (startW + dx).coerceIn(minWindowWidth(), screenWidth() - params.x)
+                        params.height = (startH + dy).coerceIn(minWindowHeight(), screenHeight() - params.y)
+                    } else {
+                        params.x = clampToScreen(startX + dx, params.width, screenWidth())
+                        params.y = clampToScreen(startY + dy, params.height, screenHeight())
+                    }
+                    updateBrowserWindow()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    prefs.edit()
+                        .putInt(KEY_WINDOW_X, params.x)
+                        .putInt(KEY_WINDOW_Y, params.y)
+                        .putInt(KEY_WINDOW_WIDTH, params.width)
+                        .putInt(KEY_WINDOW_HEIGHT, params.height)
+                        .apply()
+                }
+            }
+            true
+        }
+    }
+
+    private fun showWindowPopup(anchor: View) {
+        lateinit var popup: PopupWindow
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF3A404B.toInt(), sdp(8).toFloat())
+            setPadding(sdp(12), sdp(8), sdp(12), sdp(10))
+            minimumWidth = historyMenuWidth()
+        }
+        val mode = TextView(this).apply {
+            text = if (floatingWindow) "Mode: Floating window" else "Mode: Full screen"
+            contentDescription = "Switch between full screen and floating window"
+            textSize = scaledSp(14f)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER_VERTICAL
+            setOnClickListener {
+                popup.dismiss()
+                floatingWindow = !floatingWindow
+                prefs.edit().putBoolean(KEY_FLOATING_WINDOW, floatingWindow).apply()
+                applyBrowserWindowLayout()
+                bringBubbleToFront()
+            }
+        }
+        menu.addView(mode, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+
+        val label = TextView(this).apply {
+            text = "Opacity: ${(browserOpacity * 100).roundToInt()}%"
+            textSize = scaledSp(13f)
+            setTextColor(0xFFA9ADB5.toInt())
+        }
+        menu.addView(label)
+        val slider = SeekBar(this).apply {
+            max = 100 - (MIN_BROWSER_OPACITY * 100).roundToInt()
+            progress = (browserOpacity * 100).roundToInt() - (MIN_BROWSER_OPACITY * 100).roundToInt()
+            contentDescription = "Browser window opacity"
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                    browserOpacity = (value + (MIN_BROWSER_OPACITY * 100).roundToInt()) / 100f
+                    label.text = "Opacity: ${(browserOpacity * 100).roundToInt()}%"
+                    browserParams?.alpha = browserOpacity
+                    updateBrowserWindow()
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    prefs.edit().putFloat(KEY_BROWSER_OPACITY, browserOpacity).apply()
+                }
+            })
+        }
+        menu.addView(slider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+
+        popup = PopupWindow(menu, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
+            isOutsideTouchable = true
+            elevation = sdp(8).toFloat()
+        }
+        showPopupAboveBubble(popup, anchor, -historyMenuHorizontalOffset(), sdp(4))
     }
 
     private fun attachBrowserIfNeeded() {
@@ -631,6 +818,7 @@ class FloatingGuideService : Service() {
             findBar = null
             findInput = null
             findCount = null
+            windowGrip = null
             activeTabIndex = -1
             browserMinimized = false
         } else {
@@ -647,6 +835,8 @@ class FloatingGuideService : Service() {
         view.translationX = (browserWidth() + sdp(24)).toFloat()
         view.translationY = 0f
         params.flags = browserWindowFlags(minimized = true)
+        // Android 12+ blocks touches through untouchable overlays above 80% opacity.
+        params.alpha = 0f
         browserMinimized = true
         if (browserAttached) {
             runCatching { windowManager.updateViewLayout(view, params) }
@@ -1078,6 +1268,7 @@ class FloatingGuideService : Service() {
         addMenuItem("Forward", "Go forward") { if (web?.canGoForward() == true) web.goForward() }
         addMenuItem("Reload", "Reload page") { web?.reload() }
         addMenuItem("Find in Page", "Search text on this page") { openFindBar() }
+        addMenuItem("Window", "Window mode and opacity") { showWindowPopup(anchor) }
         val currentUrl = web?.let { currentPageUrl(it) }
         val bookmarked = currentUrl != null && isBookmarked(currentUrl)
         addMenuItem(if (bookmarked) "★ Bookmarked" else "☆ Add Bookmark", if (bookmarked) "Remove this page from bookmarks" else "Bookmark this page") {
@@ -1502,8 +1693,13 @@ class FloatingGuideService : Service() {
         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or if (minimized) {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         } else {
-            0
+            // Let touches outside a floating window reach the app behind, and tell us when they do.
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                if (browserFocusable) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         }
+    private fun windowGripHeight(): Int = sdp(22).coerceIn(dp(18), dp(28))
+    private fun minWindowWidth(): Int = sdp(240).coerceAtMost(screenWidth())
+    private fun minWindowHeight(): Int = sdp(260).coerceAtMost(screenHeight())
     private fun overlayType(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
     private fun pendingFlags(): Int = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -1543,6 +1739,13 @@ class FloatingGuideService : Service() {
         private const val KEY_TABS = "browser_tabs"
         private const val KEY_ACTIVE_TAB = "active_tab"
         private const val KEY_AD_BLOCK_ENABLED = "ad_block_enabled"
+        private const val KEY_FLOATING_WINDOW = "floating_window"
+        private const val KEY_BROWSER_OPACITY = "browser_opacity"
+        private const val KEY_WINDOW_X = "window_x"
+        private const val KEY_WINDOW_Y = "window_y"
+        private const val KEY_WINDOW_WIDTH = "window_width"
+        private const val KEY_WINDOW_HEIGHT = "window_height"
+        private const val MIN_BROWSER_OPACITY = 0.30f
         private const val KEY_SHOW_BUBBLE = "show_bubble"
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
         private const val MIN_BUBBLE_OPACITY = 0.10f
