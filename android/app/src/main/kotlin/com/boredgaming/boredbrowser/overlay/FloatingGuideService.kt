@@ -31,6 +31,7 @@ import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.URLUtil
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
@@ -106,6 +107,8 @@ class FloatingGuideService : Service() {
     private var textZoom: Int = 100
     private var browserFocusable: Boolean = true
     private var windowGrip: View? = null
+    private var fullscreenView: View? = null
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private var lastUrl: String = DEFAULT_URL
     private var lastScrollX: Int = 0
     private var lastScrollY: Int = 0
@@ -459,6 +462,22 @@ class FloatingGuideService : Service() {
                     updateTabFor(view, title = title)
                     saveTabs()
                 }
+
+                override fun onShowFileChooser(
+                    view: WebView?,
+                    callback: ValueCallback<Array<Uri>>?,
+                    params: FileChooserParams?,
+                ): Boolean {
+                    callback ?: return false
+                    openFileChooser(callback, params)
+                    return true
+                }
+
+                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                    if (view != null && callback != null) showFullscreenVideo(view, callback)
+                }
+
+                override fun onHideCustomView() = hideFullscreenVideo(notifyPage = false)
             }
             setFindListener { activeMatchOrdinal, numberOfMatches, _ ->
                 if (isActiveWebView(this)) {
@@ -849,6 +868,7 @@ class FloatingGuideService : Service() {
     }
 
     private fun hideBrowser(returnToBubble: Boolean = true, destroy: Boolean = false) {
+        hideFullscreenVideo(notifyPage = true)
         saveBrowserState(saveBundle = destroy)
         if (destroy) {
             browserView?.let {
@@ -1598,6 +1618,71 @@ class FloatingGuideService : Service() {
             })
         }
         prefs.edit().putString(KEY_BOOKMARKS, array.toString()).apply()
+    }
+
+    private fun openFileChooser(callback: ValueCallback<Array<Uri>>, params: WebChromeClient.FileChooserParams?) {
+        // Answer any earlier request so its page doesn't wait forever.
+        FileChooserActivity.pendingCallback?.invoke(null)
+        val chooser = runCatching { params?.createIntent() }.getOrNull()
+            ?: Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+        if (params?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+            chooser.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        val reopenBrowser = browserAttached && !browserMinimized
+        FileChooserActivity.pendingCallback = { uris ->
+            callback.onReceiveValue(uris)
+            if (reopenBrowser && isRunning) showBrowser(lastUrl)
+        }
+        // Overlays draw above activities, so the browser has to step aside for the picker.
+        hideBrowser(returnToBubble = true)
+        val intent = Intent(this, FileChooserActivity::class.java)
+            .putExtra(FileChooserActivity.EXTRA_CHOOSER_INTENT, chooser)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(intent) }.onFailure {
+            FileChooserActivity.pendingCallback?.invoke(null)
+            FileChooserActivity.pendingCallback = null
+            Toast.makeText(this, "Can't open the file picker", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showFullscreenVideo(view: View, callback: WebChromeClient.CustomViewCallback) {
+        if (fullscreenView != null) {
+            callback.onCustomViewHidden()
+            return
+        }
+        val container = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            isFocusableInTouchMode = true
+            setOnKeyListener { _, keyCode, event ->
+                if (keyCode != KeyEvent.KEYCODE_BACK) return@setOnKeyListener false
+                if (event.action == KeyEvent.ACTION_UP) hideFullscreenVideo(notifyPage = true)
+                true
+            }
+            addView(view, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, overlayType(),
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+            PixelFormat.OPAQUE
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+        fullscreenView = container
+        fullscreenCallback = callback
+        setBubbleSuppressed(true)
+        runCatching { windowManager.addView(container, params) }
+            .onSuccess { container.requestFocus() }
+            .onFailure { hideFullscreenVideo(notifyPage = true) }
+    }
+
+    private fun hideFullscreenVideo(notifyPage: Boolean) {
+        val container = fullscreenView ?: return
+        val callback = fullscreenCallback
+        fullscreenView = null
+        fullscreenCallback = null
+        (container as? FrameLayout)?.removeAllViews()
+        runCatching { windowManager.removeView(container) }
+        setBubbleSuppressed(false)
+        if (notifyPage) callback?.onCustomViewHidden()
     }
 
     private fun isWebUrl(url: String): Boolean = url.startsWith("http://") || url.startsWith("https://")

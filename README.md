@@ -18,6 +18,8 @@ The project is intentionally local-first and simple. There are no cloud features
 - In floating mode, taps outside the window go to the app behind it
 - Adjustable browser window opacity (30–100%)
 - Adjustable page text size (50–200%)
+- File uploads through the system file picker
+- Fullscreen video (Back returns to the page)
 - Find in page with match count and previous/next navigation
 - Bookmarks saved on the device
 - Downloads handed to Android's download manager, saved to the Downloads folder
@@ -34,6 +36,7 @@ lib/
 android/app/src/main/kotlin/com/boredgaming/boredbrowser/
   MainActivity.kt                 Flutter <-> Android method channel
   overlay/FloatingGuideService.kt Native floating bubble and WebView overlay
+  overlay/FileChooserActivity.kt  Invisible activity that opens the file picker for uploads
   overlay/TextDrawable.kt         Lightweight text drawable for toolbar buttons
 
 assets/branding/                  Source logo files used to generate Android icons
