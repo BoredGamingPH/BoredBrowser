@@ -9,10 +9,14 @@ The project is intentionally local-first and simple. There are no cloud features
 - Floating Android browser window powered by a native WebView
 - Draggable bubble icon with remembered position
 - Tap bubble to show or hide the browser window
-- Drag bubble to the bottom X target to close the overlay service
+- Drag bubble to the bottom X target, or long-press it, to close the overlay service
 - Launcher controls for overlay permission, auto-launch, bubble visibility, and opacity
-- Browser toolbar with Home, address/search field, and a compact three-dot menu
-- Three-dot menu actions: Back, Forward, Reload, Donate, and Launcher
+- Browser toolbar with Home, Back, address/search field, tabs, and a compact three-dot menu
+- Up to 4 tabs, restored with their scroll position when the browser reopens
+- Three-dot menu actions: Forward, Reload, Find in Page, Add Bookmark, Bookmarks, Ad Blocker, History, Downloads, Donate, and Launcher
+- Find in page with match count and previous/next navigation
+- Bookmarks saved on the device
+- Downloads handed to Android's download manager, saved to the Downloads folder
 - Adaptive Android launcher icon and custom floating bubble icon
 
 ## Project Structure

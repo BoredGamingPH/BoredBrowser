@@ -1,5 +1,6 @@
 package com.boredgaming.boredbrowser.overlay
 
+import android.app.DownloadManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,10 +13,15 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.IBinder
 import android.provider.Settings
+import android.text.Editable
+import android.text.TextUtils
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -23,6 +29,8 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
+import android.webkit.CookieManager
+import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
@@ -36,6 +44,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -56,6 +65,12 @@ class FloatingGuideService : Service() {
         val visitCount: Int,
     )
 
+    private data class Bookmark(
+        val title: String,
+        val url: String,
+        val addedAt: Long,
+    )
+
     private data class BrowserTab(
         val id: Int,
         val webView: WebView,
@@ -73,10 +88,14 @@ class FloatingGuideService : Service() {
     private var webView: WebView? = null
     private var browserContentView: FrameLayout? = null
     private var addressBar: EditText? = null
+    private var findBar: View? = null
+    private var findInput: EditText? = null
+    private var findCount: TextView? = null
     private var browserParams: WindowManager.LayoutParams? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var webState: Bundle? = null
     private val tabs = mutableListOf<BrowserTab>()
+    private val downloadUrls = mutableSetOf<String>()
     private var activeTabIndex: Int = -1
     private var nextTabId: Int = 1
     private var browserAttached: Boolean = false
@@ -113,7 +132,7 @@ class FloatingGuideService : Service() {
         isRunning = true
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        lastUrl = prefs.getString(KEY_LAST_URL, DEFAULT_URL) ?: DEFAULT_URL
+        lastUrl = prefs.getString(KEY_LAST_URL, DEFAULT_URL)?.takeIf { isWebUrl(it) } ?: DEFAULT_URL
         lastScrollX = prefs.getInt(KEY_SCROLL_X, 0)
         lastScrollY = prefs.getInt(KEY_SCROLL_Y, 0)
         bubbleVisible = prefs.getBoolean(KEY_SHOW_BUBBLE, true)
@@ -269,6 +288,7 @@ class FloatingGuideService : Service() {
         titleBar.addView(menuButton("⋮") { anchor -> showToolbarMenu(anchor, webView) })
 
         container.addView(titleBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, toolbarHeight()))
+        container.addView(createFindBar(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, toolbarHeight()))
         container.addView(content, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         val params = WindowManager.LayoutParams(
@@ -287,6 +307,79 @@ class FloatingGuideService : Service() {
         browserAttached = true
         browserMinimized = false
         bringBubbleToFront()
+    }
+
+    private fun createFindBar(): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(sdp(6), sdp(4), sdp(6), sdp(4))
+            setBackgroundColor(0xFF14161B.toInt())
+            visibility = View.GONE
+        }
+        val input = EditText(this).apply {
+            setSingleLine(true)
+            textSize = scaledSp(13f)
+            setTextColor(Color.WHITE)
+            setHintTextColor(0xFFA9ADB5.toInt())
+            hint = "Find in page"
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF31353D.toInt(), sdp(6).toFloat())
+            setPadding(sdp(8), 0, sdp(8), 0)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) = runFind(s?.toString().orEmpty())
+            })
+            setOnEditorActionListener { view, _, _ ->
+                webView?.findNext(true)
+                hideKeyboard(view)
+                true
+            }
+        }
+        val count = TextView(this).apply {
+            textSize = scaledSp(12f)
+            setTextColor(0xFFA9ADB5.toInt())
+            gravity = Gravity.CENTER
+            minWidth = sdp(44)
+        }
+        findInput = input
+        findCount = count
+        bar.addView(input, LinearLayout.LayoutParams(0, toolbarButtonSize(), 1f).apply { marginEnd = sdp(4) })
+        bar.addView(count, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, toolbarButtonSize()).apply { marginEnd = sdp(4) })
+        bar.addView(iconButton("▲") { webView?.findNext(false) })
+        bar.addView(iconButton("▼") { webView?.findNext(true) })
+        bar.addView(menuButton("×") { closeFindBar() })
+        findBar = bar
+        return bar
+    }
+
+    private fun openFindBar() {
+        val bar = findBar ?: return
+        val input = findInput ?: return
+        bar.visibility = View.VISIBLE
+        input.requestFocus()
+        input.selectAll()
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+        runFind(input.text.toString())
+    }
+
+    private fun closeFindBar() {
+        findBar?.visibility = View.GONE
+        findInput?.let { hideKeyboard(it) }
+        findCount?.text = ""
+        tabs.forEach { it.webView.clearMatches() }
+    }
+
+    private fun runFind(query: String) {
+        if (findBar?.visibility != View.VISIBLE) return
+        val web = webView ?: return
+        if (query.isBlank()) {
+            web.clearMatches()
+            findCount?.text = ""
+        } else {
+            web.findAllAsync(query)
+        }
     }
 
     private fun createTab(initialUrl: String = DEFAULT_URL): BrowserTab {
@@ -314,7 +407,8 @@ class FloatingGuideService : Service() {
                 }
 
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
-                    pageUrl?.let {
+                    // Downloads and about:blank also report "finished"; they aren't pages to remember.
+                    pageUrl?.takeIf { isWebUrl(it) && it !in downloadUrls }?.let {
                         val previousUrl = lastUrl
                         updateTabFor(view, it)
                         if (isActiveWebView(view)) {
@@ -331,6 +425,7 @@ class FloatingGuideService : Service() {
                             installScrollBridge(view)
                             recordHistory(it, view?.title)
                             restoreScrollWhenReady()
+                            runFind(findInput?.text?.toString().orEmpty())
                         }
                         saveTabs()
                     }
@@ -343,6 +438,25 @@ class FloatingGuideService : Service() {
                     saveTabs()
                 }
             }
+            setFindListener { activeMatchOrdinal, numberOfMatches, _ ->
+                if (isActiveWebView(this)) {
+                    findCount?.text = if (numberOfMatches == 0) "0/0" else "${activeMatchOrdinal + 1}/$numberOfMatches"
+                }
+            }
+            setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+                downloadUrls.add(url)
+                enqueueDownload(url, userAgent, contentDisposition, mimeType)
+                // A download never commits, so the back/forward list still holds the real page.
+                val pageUrl = copyBackForwardList().currentItem?.url?.takeIf { isWebUrl(it) }
+                tabs.firstOrNull { it.webView == this }?.let { tab ->
+                    if (pageUrl != null) tab.url = pageUrl
+                    if (isActiveWebView(this)) {
+                        lastUrl = tab.url
+                        addressBar?.setText(tab.url)
+                    }
+                }
+                saveTabs()
+            }
             addJavascriptInterface(ScrollBridge(this), SCROLL_BRIDGE_NAME)
             if (webState?.let { restoreState(it) != null } != true) {
                 loadUrl(normalizeUrl(initialUrl))
@@ -352,6 +466,7 @@ class FloatingGuideService : Service() {
     private fun switchToTab(index: Int) {
         if (index !in tabs.indices) return
         saveBrowserState(saveBundle = false)
+        webView?.clearMatches()
         tabs.forEachIndexed { tabIndex, tab ->
             tab.webView.visibility = if (tabIndex == index) View.VISIBLE else View.GONE
         }
@@ -364,6 +479,7 @@ class FloatingGuideService : Service() {
         addressBar?.setText(active.url)
         restoreScrollWhenReady()
         saveTabs()
+        runFind(findInput?.text?.toString().orEmpty())
     }
 
     private fun closeTab(index: Int) {
@@ -412,7 +528,7 @@ class FloatingGuideService : Service() {
             val array = JSONArray(raw)
             List(array.length()) { index -> array.optJSONObject(index) }
                 .filterNotNull()
-                .filter { it.optString("url").isNotBlank() }
+                .filter { isWebUrl(it.optString("url")) }
                 .take(MAX_TABS)
         }.getOrDefault(emptyList())
         if (saved.isEmpty()) {
@@ -512,6 +628,9 @@ class FloatingGuideService : Service() {
             browserParams = null
             browserContentView = null
             addressBar = null
+            findBar = null
+            findInput = null
+            findCount = null
             activeTabIndex = -1
             browserMinimized = false
         } else {
@@ -536,7 +655,7 @@ class FloatingGuideService : Service() {
 
     private fun saveBrowserState(saveBundle: Boolean) {
         webView?.let { web ->
-            lastUrl = web.url ?: lastUrl
+            lastUrl = currentPageUrl(web) ?: lastUrl
             val remembered = rememberedScrollFor(lastUrl)
             if (web.scrollY > 0 || remembered.second == 0) {
                 lastScrollX = web.scrollX
@@ -958,6 +1077,13 @@ class FloatingGuideService : Service() {
 
         addMenuItem("Forward", "Go forward") { if (web?.canGoForward() == true) web.goForward() }
         addMenuItem("Reload", "Reload page") { web?.reload() }
+        addMenuItem("Find in Page", "Search text on this page") { openFindBar() }
+        val currentUrl = web?.let { currentPageUrl(it) }
+        val bookmarked = currentUrl != null && isBookmarked(currentUrl)
+        addMenuItem(if (bookmarked) "★ Bookmarked" else "☆ Add Bookmark", if (bookmarked) "Remove this page from bookmarks" else "Bookmark this page") {
+            toggleBookmark(web)
+        }
+        addMenuItem("Bookmarks", "Open saved bookmarks") { showBookmarksPopup(anchor, web) }
         addMenuItem(if (adBlockEnabled) "Ad Blocker: On" else "Ad Blocker: Off", "Toggle built-in ad blocker") {
             adBlockEnabled = !adBlockEnabled
             prefs.edit().putBoolean(KEY_AD_BLOCK_ENABLED, adBlockEnabled).apply()
@@ -965,6 +1091,7 @@ class FloatingGuideService : Service() {
             web?.reload()
         }
         addMenuItem("History", "Open browsing history") { showHistoryPopup(anchor, web) }
+        addMenuItem("Downloads", "Open downloaded files") { openDownloads() }
         addMenuItem("☕ Donate", "Support BoredBrowser on Ko-fi") { web?.loadUrl(KOFI_URL) }
         addMenuItem("Launcher", "Open BoredBrowser launcher") { openLauncher() }
 
@@ -1109,6 +1236,169 @@ class FloatingGuideService : Service() {
         prefs.edit().putString(KEY_HISTORY, array.toString()).apply()
     }
 
+    private fun showBookmarksPopup(anchor: View, web: WebView?) {
+        lateinit var popup: PopupWindow
+        val bookmarks = loadBookmarks()
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedDrawable(0xFF252A33.toInt(), 0xFF3A404B.toInt(), sdp(8).toFloat())
+            setPadding(sdp(6), sdp(6), sdp(6), sdp(6))
+        }
+
+        val header = TextView(this).apply {
+            text = "Bookmarks"
+            textSize = scaledSp(13f)
+            setTextColor(0xFFA9ADB5.toInt())
+            setPadding(sdp(12), sdp(8), sdp(12), sdp(8))
+            minWidth = historyMenuWidth()
+        }
+        menu.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+
+        if (bookmarks.isEmpty()) {
+            val empty = TextView(this).apply {
+                text = "No bookmarks yet"
+                textSize = scaledSp(14f)
+                setTextColor(Color.WHITE)
+                setPadding(sdp(12), sdp(10), sdp(12), sdp(10))
+                minWidth = historyMenuWidth()
+            }
+            menu.addView(empty, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+        } else {
+            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            bookmarks.forEach { bookmark ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                val title = TextView(this).apply {
+                    text = bookmark.title.ifBlank { bookmark.url }
+                    contentDescription = "Open ${bookmark.url}"
+                    textSize = scaledSp(14f)
+                    setTextColor(Color.WHITE)
+                    setSingleLine(true)
+                    ellipsize = TextUtils.TruncateAt.END
+                    setPadding(sdp(12), 0, sdp(8), 0)
+                    gravity = Gravity.CENTER_VERTICAL
+                    setOnClickListener {
+                        popup.dismiss()
+                        web?.loadUrl(bookmark.url)
+                    }
+                    setOnLongClickListener {
+                        Toast.makeText(this@FloatingGuideService, bookmark.url, Toast.LENGTH_SHORT).show()
+                        true
+                    }
+                }
+                val remove = TextView(this).apply {
+                    text = "×"
+                    contentDescription = "Remove bookmark ${bookmark.title}"
+                    gravity = Gravity.CENTER
+                    textSize = scaledSp(18f)
+                    setTextColor(0xFFFFD0C8.toInt())
+                    setOnClickListener {
+                        removeBookmark(bookmark.url)
+                        list.removeView(row)
+                        if (list.childCount == 0) popup.dismiss()
+                    }
+                }
+                row.addView(title, LinearLayout.LayoutParams(0, menuItemHeight(), 1f))
+                row.addView(remove, LinearLayout.LayoutParams(menuItemHeight(), menuItemHeight()))
+                list.addView(row, LinearLayout.LayoutParams(historyMenuWidth(), menuItemHeight()))
+            }
+            // Cap the visible rows so a long list scrolls instead of running off screen.
+            val scroller = ScrollView(this).apply { addView(list) }
+            val visibleRows = bookmarks.size.coerceAtMost(BOOKMARK_MENU_VISIBLE_ROWS)
+            menu.addView(scroller, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, visibleRows * menuItemHeight()))
+        }
+
+        popup = PopupWindow(menu, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
+            isOutsideTouchable = true
+            elevation = sdp(8).toFloat()
+        }
+        showPopupAboveBubble(popup, anchor, -historyMenuHorizontalOffset(), sdp(4))
+    }
+
+    private fun toggleBookmark(web: WebView?) {
+        val url = web?.let { currentPageUrl(it) } ?: return
+        if (isBookmarked(url)) {
+            removeBookmark(url)
+            Toast.makeText(this, "Bookmark removed", Toast.LENGTH_SHORT).show()
+        } else {
+            val bookmark = Bookmark(web.title?.takeIf { it.isNotBlank() } ?: url, url, System.currentTimeMillis())
+            saveBookmarks(listOf(bookmark) + loadBookmarks())
+            Toast.makeText(this, "Bookmarked", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun isBookmarked(url: String): Boolean = loadBookmarks().any { it.url == url }
+
+    private fun removeBookmark(url: String) = saveBookmarks(loadBookmarks().filterNot { it.url == url })
+
+    private fun loadBookmarks(): List<Bookmark> {
+        val raw = prefs.getString(KEY_BOOKMARKS, "[]") ?: "[]"
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                Bookmark(
+                    title = item.optString("title"),
+                    url = item.optString("url"),
+                    addedAt = item.optLong("addedAt"),
+                )
+            }.filter { it.url.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveBookmarks(bookmarks: List<Bookmark>) {
+        val array = JSONArray()
+        bookmarks.forEach { bookmark ->
+            array.put(JSONObject().apply {
+                put("title", bookmark.title)
+                put("url", bookmark.url)
+                put("addedAt", bookmark.addedAt)
+            })
+        }
+        prefs.edit().putString(KEY_BOOKMARKS, array.toString()).apply()
+    }
+
+    private fun isWebUrl(url: String): Boolean = url.startsWith("http://") || url.startsWith("https://")
+
+    // WebView.url reports a download link after a download starts; fall back to the committed page.
+    private fun currentPageUrl(web: WebView): String? =
+        web.url?.takeIf { isWebUrl(it) && it !in downloadUrls }
+            ?: web.copyBackForwardList().currentItem?.url?.takeIf { isWebUrl(it) }
+
+    private fun enqueueDownload(url: String, userAgent: String?, contentDisposition: String?, mimeType: String?) {
+        // DownloadManager only fetches http(s); blob:/data: URLs live inside the page.
+        if (!isWebUrl(url)) {
+            Toast.makeText(this, "This file can't be downloaded", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+        val request = DownloadManager.Request(Uri.parse(url)).apply {
+            setTitle(fileName)
+            setMimeType(mimeType)
+            CookieManager.getInstance().getCookie(url)?.let { addRequestHeader("Cookie", it) }
+            userAgent?.let { addRequestHeader("User-Agent", it) }
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            // Public Downloads needs a storage permission before Android 10, which a service can't request.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+            } else {
+                setDestinationInExternalFilesDir(this@FloatingGuideService, Environment.DIRECTORY_DOWNLOADS, fileName)
+            }
+        }
+        runCatching { (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request) }
+            .onSuccess { Toast.makeText(this, "Downloading $fileName", Toast.LENGTH_SHORT).show() }
+            .onFailure { Toast.makeText(this, "Download failed", Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun openDownloads() {
+        hideBrowser(returnToBubble = true)
+        val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(intent) }
+            .onFailure { Toast.makeText(this, "No downloads app found", Toast.LENGTH_SHORT).show() }
+    }
+
     private fun buttonDescription(label: String): String = when (label) {
         "☰" -> "Open BoredBrowser launcher"
         "‹" -> "Go back"
@@ -1117,6 +1407,9 @@ class FloatingGuideService : Service() {
         "⌂" -> "Open home page"
         "⋮" -> "Open browser actions"
         "▣" -> "Open tabs"
+        "▲" -> "Previous match"
+        "▼" -> "Next match"
+        "×" -> "Close find bar"
         else -> label
     }
 
@@ -1246,6 +1539,7 @@ class FloatingGuideService : Service() {
         private const val KEY_SCROLL_Y = "scroll_y"
         private const val KEY_SCROLL_BY_URL = "scroll_by_url"
         private const val KEY_HISTORY = "browser_history"
+        private const val KEY_BOOKMARKS = "browser_bookmarks"
         private const val KEY_TABS = "browser_tabs"
         private const val KEY_ACTIVE_TAB = "active_tab"
         private const val KEY_AD_BLOCK_ENABLED = "ad_block_enabled"
@@ -1258,6 +1552,7 @@ class FloatingGuideService : Service() {
         private const val SCROLL_RESTORE_ATTEMPTS = 16
         private const val MAX_HISTORY_ENTRIES = 100
         private const val HISTORY_MENU_LIMIT = 12
+        private const val BOOKMARK_MENU_VISIBLE_ROWS = 8
         private const val MAX_TABS = 4
         private const val DEFAULT_URL = "https://www.google.com"
         private const val KOFI_URL = "https://ko-fi.com/boredgamingph"
