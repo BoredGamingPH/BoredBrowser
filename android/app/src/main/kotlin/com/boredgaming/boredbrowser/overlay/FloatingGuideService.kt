@@ -20,6 +20,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebChromeClient
@@ -87,10 +88,11 @@ class FloatingGuideService : Service() {
     private var bubbleOpacity: Float = 1f
     private var adBlockEnabled: Boolean = true
 
-    private inner class ScrollBridge {
+    private inner class ScrollBridge(private val owner: WebView) {
         @JavascriptInterface
         fun save(x: Int, y: Int, url: String?) {
-            webView?.post {
+            owner.post {
+                if (!isActiveWebView(owner)) return@post
                 val pageUrl = url?.takeIf { it.isNotBlank() } ?: webView?.url ?: lastUrl
                 val remembered = rememberedScrollFor(pageUrl)
                 if (y == 0 && remembered.second > 0 && browserMinimized) return@post
@@ -255,9 +257,10 @@ class FloatingGuideService : Service() {
 
         val content = FrameLayout(this)
         browserContentView = content
+        val savedActiveTab = prefs.getInt(KEY_ACTIVE_TAB, 0)
         restoreSavedTabs(url)
         if (tabs.isEmpty()) createTab(url)
-        switchToTab(prefs.getInt(KEY_ACTIVE_TAB, 0).coerceIn(0, tabs.lastIndex))
+        switchToTab(savedActiveTab.coerceIn(0, tabs.lastIndex))
 
         titleBar.addView(iconButton("⌂") { webView?.loadUrl(DEFAULT_URL) })
         titleBar.addView(iconButton("‹") { handleBrowserBack(webView) })
@@ -340,7 +343,7 @@ class FloatingGuideService : Service() {
                     saveTabs()
                 }
             }
-            addJavascriptInterface(ScrollBridge(), SCROLL_BRIDGE_NAME)
+            addJavascriptInterface(ScrollBridge(this), SCROLL_BRIDGE_NAME)
             if (webState?.let { restoreState(it) != null } != true) {
                 loadUrl(normalizeUrl(initialUrl))
             }
@@ -366,18 +369,20 @@ class FloatingGuideService : Service() {
     private fun closeTab(index: Int) {
         if (index !in tabs.indices) return
         val removed = tabs.removeAt(index)
-        browserContentView?.removeView(removed.webView)
-        removed.webView.destroy()
-        saveTabs()
-        if (tabs.isEmpty()) {
-            createTab(DEFAULT_URL)
-            switchToTab(0)
-            return
-        }
         val nextIndex = when {
             activeTabIndex > index -> activeTabIndex - 1
             activeTabIndex >= tabs.size -> tabs.lastIndex
             else -> activeTabIndex
+        }
+        // Detach the closed WebView first so switchToTab doesn't save state from it.
+        if (webView == removed.webView) webView = null
+        activeTabIndex = -1
+        browserContentView?.removeView(removed.webView)
+        removed.webView.destroy()
+        if (tabs.isEmpty()) {
+            createTab(DEFAULT_URL)
+            switchToTab(0)
+            return
         }
         switchToTab(nextIndex.coerceIn(0, tabs.lastIndex))
     }
@@ -403,17 +408,29 @@ class FloatingGuideService : Service() {
 
     private fun restoreSavedTabs(fallbackUrl: String) {
         val raw = prefs.getString(KEY_TABS, "[]") ?: "[]"
-        val savedUrls = runCatching {
+        val saved = runCatching {
             val array = JSONArray(raw)
-            List(array.length()) { index -> array.optJSONObject(index)?.optString("url").orEmpty() }
-                .filter { it.isNotBlank() }
+            List(array.length()) { index -> array.optJSONObject(index) }
+                .filterNotNull()
+                .filter { it.optString("url").isNotBlank() }
                 .take(MAX_TABS)
         }.getOrDefault(emptyList())
-        val urls = savedUrls.ifEmpty { listOf(fallbackUrl) }
-        urls.forEach { createTab(it) }
+        if (saved.isEmpty()) {
+            createTab(fallbackUrl)
+            return
+        }
+        saved.forEach { json ->
+            createTab(json.optString("url")).apply {
+                title = json.optString("title").ifBlank { title }
+                scrollX = json.optInt("scrollX", 0).coerceAtLeast(0)
+                scrollY = json.optInt("scrollY", 0).coerceAtLeast(0)
+            }
+        }
     }
 
     private fun saveTabs() {
+        // Tabs are cleared when the browser is destroyed; late callbacks must not wipe the saved list.
+        if (tabs.isEmpty()) return
         val array = JSONArray()
         tabs.forEach { tab ->
             array.put(JSONObject().apply {
@@ -538,7 +555,8 @@ class FloatingGuideService : Service() {
             }
             persistScroll(lastUrl, lastScrollX, lastScrollY)
             saveTabs()
-            capturePageScroll(web)
+            // Skip the async capture when tearing down; the WebView is destroyed right after.
+            if (!saveBundle) capturePageScroll(web)
         }
     }
 
@@ -566,8 +584,10 @@ class FloatingGuideService : Service() {
               if (window.__boredBrowserScrollHook) return;
               window.__boredBrowserScrollHook = true;
               var send = function() {
-                var x = Math.round(window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0);
-                var y = Math.round(window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0);
+                // Report device pixels so values match WebView.scrollX/scrollY.
+                var ratio = window.devicePixelRatio || 1;
+                var x = Math.round((window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0) * ratio);
+                var y = Math.round((window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0) * ratio);
                 if (window.$SCROLL_BRIDGE_NAME && window.$SCROLL_BRIDGE_NAME.save) {
                   window.$SCROLL_BRIDGE_NAME.save(x, y, window.location.href);
                 }
@@ -587,9 +607,10 @@ class FloatingGuideService : Service() {
         web.evaluateJavascript(
             """
             (function() {
+              var ratio = window.devicePixelRatio || 1;
               return JSON.stringify({
-                x: Math.round(window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0),
-                y: Math.round(window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0),
+                x: Math.round((window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0) * ratio),
+                y: Math.round((window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0) * ratio),
                 url: window.location.href
               });
             })();
@@ -620,8 +641,10 @@ class FloatingGuideService : Service() {
         web.evaluateJavascript(
             """
             (function() {
-              var x = $x;
-              var y = $y;
+              // x and y arrive in device pixels; the DOM scrolls in CSS pixels.
+              var ratio = window.devicePixelRatio || 1;
+              var x = $x / ratio;
+              var y = $y / ratio;
               window.scrollTo(x, y);
               document.documentElement.scrollLeft = x;
               document.documentElement.scrollTop = y;
@@ -629,7 +652,7 @@ class FloatingGuideService : Service() {
                 document.body.scrollLeft = x;
                 document.body.scrollTop = y;
               }
-              return Math.round(window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0);
+              return Math.round((window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0) * ratio);
             })();
             """.trimIndent(),
             null,
@@ -742,8 +765,18 @@ class FloatingGuideService : Service() {
         var downX = 0f
         var downY = 0f
         var moved = false
+        var longPressed = false
+        // The touch listener consumes every event, so long-press has to be detected here.
+        val longPress = Runnable {
+            if (!moved) {
+                longPressed = true
+                hideCloseTarget()
+                handle.performLongClick()
+            }
+        }
         handle.setOnTouchListener { view, event ->
             val targetView = if (snap) bubbleView ?: view else browserView ?: view
+            if (longPressed && event.actionMasked != MotionEvent.ACTION_DOWN) return@setOnTouchListener true
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
@@ -751,6 +784,8 @@ class FloatingGuideService : Service() {
                     downX = event.rawX
                     downY = event.rawY
                     moved = false
+                    longPressed = false
+                    view.postDelayed(longPress, ViewConfiguration.getLongPressTimeout().toLong())
                     if (snap) showCloseTarget()
                     true
                 }
@@ -758,6 +793,7 @@ class FloatingGuideService : Service() {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
                     moved = moved || abs(dx) > sdp(4) || abs(dy) > sdp(4)
+                    if (moved) view.removeCallbacks(longPress)
                     params.x = clampToScreen(initialX + dx, params.width, screenWidth())
                     params.y = clampToScreen(initialY + dy, params.height, screenHeight())
                     runCatching { windowManager.updateViewLayout(targetView, params) }
@@ -765,6 +801,7 @@ class FloatingGuideService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    view.removeCallbacks(longPress)
                     if (snap && moved && isInCloseTarget(params)) {
                         hideCloseTarget()
                         stopSelf()
@@ -887,7 +924,7 @@ class FloatingGuideService : Service() {
             isOutsideTouchable = true
             elevation = sdp(8).toFloat()
         }
-        popup.showAsDropDown(anchor, -tabsMenuHorizontalOffset(), sdp(4))
+        showPopupAboveBubble(popup, anchor, -tabsMenuHorizontalOffset(), sdp(4))
     }
 
     private fun showToolbarMenu(anchor: View, web: WebView?) {
@@ -935,7 +972,7 @@ class FloatingGuideService : Service() {
             isOutsideTouchable = true
             elevation = sdp(8).toFloat()
         }
-        popup.showAsDropDown(anchor, -menuHorizontalOffset(), sdp(4))
+        showPopupAboveBubble(popup, anchor, -menuHorizontalOffset(), sdp(4))
     }
 
     private fun showHistoryPopup(anchor: View, web: WebView?) {
@@ -1006,7 +1043,27 @@ class FloatingGuideService : Service() {
             isOutsideTouchable = true
             elevation = sdp(8).toFloat()
         }
-        popup.showAsDropDown(anchor, -historyMenuHorizontalOffset(), sdp(4))
+        showPopupAboveBubble(popup, anchor, -historyMenuHorizontalOffset(), sdp(4))
+    }
+
+    // The bubble is a separate overlay window drawn above popups, so hide it and let touches pass
+    // through while a menu is open.
+    private fun showPopupAboveBubble(popup: PopupWindow, anchor: View, xOffset: Int, yOffset: Int) {
+        setBubbleSuppressed(true)
+        popup.setOnDismissListener { setBubbleSuppressed(false) }
+        popup.showAsDropDown(anchor, xOffset, yOffset)
+    }
+
+    private fun setBubbleSuppressed(suppressed: Boolean) {
+        val bubble = bubbleView ?: return
+        val params = bubbleParams ?: return
+        bubble.visibility = if (suppressed) View.INVISIBLE else View.VISIBLE
+        params.flags = if (suppressed) {
+            params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        }
+        runCatching { windowManager.updateViewLayout(bubble, params) }
     }
 
     private fun recordHistory(url: String, title: String?) {
