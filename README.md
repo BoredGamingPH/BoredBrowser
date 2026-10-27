@@ -13,10 +13,11 @@ The project is intentionally local-first and simple. There are no cloud features
 - Launcher controls for overlay permission, auto-launch, bubble visibility, and opacity
 - Browser toolbar with Home, Back, address/search field, tabs, and a compact three-dot menu
 - Up to 4 tabs, restored with their scroll position when the browser reopens
-- Three-dot menu actions: Forward, Reload, Find in Page, Window, Add Bookmark, Bookmarks, Ad Blocker, History, Downloads, Donate, and Launcher
+- Three-dot menu actions: Forward, Reload, Find in Page, View, Add Bookmark, Bookmarks, Ad Blocker, History, Downloads, Donate, and Launcher
 - Full screen or floating window mode; drag the bottom grip to move and the corner to resize
 - In floating mode, taps outside the window go to the app behind it
 - Adjustable browser window opacity (30–100%)
+- Adjustable page text size (50–200%)
 - Find in page with match count and previous/next navigation
 - Bookmarks saved on the device
 - Downloads handed to Android's download manager, saved to the Downloads folder

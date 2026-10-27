@@ -103,6 +103,7 @@ class FloatingGuideService : Service() {
     private var browserMinimized: Boolean = false
     private var floatingWindow: Boolean = false
     private var browserOpacity: Float = 1f
+    private var textZoom: Int = 100
     private var browserFocusable: Boolean = true
     private var windowGrip: View? = null
     private var lastUrl: String = DEFAULT_URL
@@ -145,6 +146,7 @@ class FloatingGuideService : Service() {
         adBlockEnabled = prefs.getBoolean(KEY_AD_BLOCK_ENABLED, true)
         floatingWindow = prefs.getBoolean(KEY_FLOATING_WINDOW, false)
         browserOpacity = prefs.getFloat(KEY_BROWSER_OPACITY, 1f).coerceIn(MIN_BROWSER_OPACITY, 1f)
+        textZoom = prefs.getInt(KEY_TEXT_ZOOM, 100).coerceIn(MIN_TEXT_ZOOM, MAX_TEXT_ZOOM)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification())
     }
@@ -420,6 +422,7 @@ class FloatingGuideService : Service() {
             settings.setSupportZoom(true)
             settings.builtInZoomControls = true
             settings.displayZoomControls = false
+            settings.textZoom = textZoom
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                     return if (shouldBlockRequest(request)) emptyBlockedResponse() else null
@@ -669,6 +672,12 @@ class FloatingGuideService : Service() {
         return grip
     }
 
+    private fun setTextZoom(value: Int) {
+        textZoom = value.coerceIn(MIN_TEXT_ZOOM, MAX_TEXT_ZOOM)
+        tabs.forEach { it.webView.settings.textZoom = textZoom }
+        prefs.edit().putInt(KEY_TEXT_ZOOM, textZoom).apply()
+    }
+
     private fun attachWindowDrag(handle: View, resize: Boolean) {
         var startX = 0
         var startY = 0
@@ -760,6 +769,46 @@ class FloatingGuideService : Service() {
             })
         }
         menu.addView(slider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+
+        val zoomLabel = TextView(this).apply {
+            text = "Text size"
+            textSize = scaledSp(13f)
+            setTextColor(0xFFA9ADB5.toInt())
+        }
+        menu.addView(zoomLabel)
+        val zoomRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val zoomValue = TextView(this).apply {
+            text = "$textZoom%"
+            contentDescription = "Text size $textZoom percent"
+            gravity = Gravity.CENTER
+            textSize = scaledSp(14f)
+            setTextColor(Color.WHITE)
+        }
+        fun zoomButton(label: String, description: String, action: () -> Unit) = TextView(this).apply {
+            text = label
+            contentDescription = description
+            gravity = Gravity.CENTER
+            textSize = scaledSp(14f)
+            setTextColor(Color.WHITE)
+            background = roundedDrawable(0xFF313844.toInt(), 0xFF3A404B.toInt(), sdp(6).toFloat())
+            setOnClickListener {
+                action()
+                zoomValue.text = "$textZoom%"
+                zoomValue.contentDescription = "Text size $textZoom percent"
+            }
+        }
+        val buttonSize = toolbarButtonSize()
+        zoomRow.addView(zoomButton("A−", "Smaller text") { setTextZoom(textZoom - TEXT_ZOOM_STEP) }, LinearLayout.LayoutParams(buttonSize, buttonSize))
+        zoomRow.addView(zoomValue, LinearLayout.LayoutParams(0, buttonSize, 1f))
+        zoomRow.addView(zoomButton("A+", "Larger text") { setTextZoom(textZoom + TEXT_ZOOM_STEP) }, LinearLayout.LayoutParams(buttonSize, buttonSize))
+        zoomRow.addView(
+            zoomButton("Reset", "Reset text size") { setTextZoom(100) },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, buttonSize).apply { marginStart = sdp(8) },
+        )
+        menu.addView(zoomRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
 
         popup = PopupWindow(menu, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true).apply {
             isOutsideTouchable = true
@@ -1268,7 +1317,7 @@ class FloatingGuideService : Service() {
         addMenuItem("Forward", "Go forward") { if (web?.canGoForward() == true) web.goForward() }
         addMenuItem("Reload", "Reload page") { web?.reload() }
         addMenuItem("Find in Page", "Search text on this page") { openFindBar() }
-        addMenuItem("Window", "Window mode and opacity") { showWindowPopup(anchor) }
+        addMenuItem("View", "Window mode, opacity and text size") { showWindowPopup(anchor) }
         val currentUrl = web?.let { currentPageUrl(it) }
         val bookmarked = currentUrl != null && isBookmarked(currentUrl)
         addMenuItem(if (bookmarked) "★ Bookmarked" else "☆ Add Bookmark", if (bookmarked) "Remove this page from bookmarks" else "Bookmark this page") {
@@ -1746,6 +1795,10 @@ class FloatingGuideService : Service() {
         private const val KEY_WINDOW_WIDTH = "window_width"
         private const val KEY_WINDOW_HEIGHT = "window_height"
         private const val MIN_BROWSER_OPACITY = 0.30f
+        private const val KEY_TEXT_ZOOM = "text_zoom"
+        private const val MIN_TEXT_ZOOM = 50
+        private const val MAX_TEXT_ZOOM = 200
+        private const val TEXT_ZOOM_STEP = 10
         private const val KEY_SHOW_BUBBLE = "show_bubble"
         private const val KEY_BUBBLE_OPACITY = "bubble_opacity"
         private const val MIN_BUBBLE_OPACITY = 0.10f
