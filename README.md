@@ -13,13 +13,16 @@ The project is intentionally local-first and simple. There are no cloud features
 - Launcher controls for overlay permission, auto-launch, bubble visibility, and opacity
 - Browser toolbar with Home, Back, address/search field, tabs, and a compact three-dot menu
 - Up to 4 tabs, restored with their scroll position when the browser reopens
-- Three-dot menu actions: Forward, Reload, Find in Page, View, Add Bookmark, Bookmarks, Ad Blocker, History, Downloads, Donate, and Launcher
+- Three-dot menu actions: Forward, Reload, Find in Page, View, Add Bookmark, Bookmarks, PDF Guides, Ad Blocker, History, Downloads, Donate, and Launcher
 - Full screen or floating window mode; drag the bottom grip to move and the corner to resize
 - In floating mode, taps outside the window go to the app behind it
 - Adjustable browser window opacity (30–100%)
 - Adjustable page text size (50–200%)
 - File uploads through the system file picker
 - Fullscreen video (Back returns to the page)
+- PDF guide viewer (bundled PDF.js) with search, zoom, page jump, and outline; remembers your page
+- Recent PDF guides list that reopens local files with one tap
+- PDF links on websites open in the viewer, with Download PDF in the three-dot menu
 - Find in page with match count and previous/next navigation
 - Bookmarks saved on the device
 - Downloads handed to Android's download manager, saved to the Downloads folder
@@ -38,6 +41,8 @@ android/app/src/main/kotlin/com/boredgaming/boredbrowser/
   overlay/FloatingGuideService.kt Native floating bubble and WebView overlay
   overlay/FileChooserActivity.kt  Invisible activity that opens the file picker for uploads
   overlay/TextDrawable.kt         Lightweight text drawable for toolbar buttons
+
+android/app/src/main/assets/pdfjs/ Bundled PDF.js viewer (Apache 2.0, trimmed to English)
 
 assets/branding/                  Source logo files used to generate Android icons
 ```

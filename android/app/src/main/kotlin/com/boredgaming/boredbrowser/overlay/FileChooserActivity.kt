@@ -41,6 +41,14 @@ class FileChooserActivity : Activity() {
             deliver(null)
             return
         }
+        if (intent.getBooleanExtra(EXTRA_PERSIST, false)) {
+            // Keep read access after this activity finishes so the files can be reopened later.
+            val kept = picked.filter { uri ->
+                runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }.isSuccess
+            }
+            deliver(kept.takeIf { it.isNotEmpty() }?.toTypedArray())
+            return
+        }
         // Read access to picked files ends when this activity finishes, before the page
         // uploads them, so hand the page private copies instead. Copy off the main thread.
         Thread {
@@ -103,6 +111,7 @@ class FileChooserActivity : Activity() {
 
     companion object {
         const val EXTRA_CHOOSER_INTENT = "chooserIntent"
+        const val EXTRA_PERSIST = "persist"
         private const val REQUEST_CODE = 1
         private const val UPLOADS_DIR = "uploads"
 

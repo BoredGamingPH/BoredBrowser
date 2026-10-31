@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.IBinder
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextUtils
@@ -55,6 +56,10 @@ import com.boredgaming.boredbrowser.R
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -71,6 +76,13 @@ class FloatingGuideService : Service() {
         val title: String,
         val url: String,
         val addedAt: Long,
+    )
+
+    private data class Guide(
+        val id: String,
+        val title: String,
+        val uri: String,
+        val openedAt: Long,
     )
 
     private data class BrowserTab(
@@ -284,7 +296,7 @@ class FloatingGuideService : Service() {
             setTextColor(Color.WHITE)
             setHintTextColor(0xFFA9ADB5.toInt())
             hint = "Search or URL"
-            setText(url)
+            setText(displayUrl(url))
             background = roundedDrawable(0xFF252A33.toInt(), 0xFF31353D.toInt(), sdp(6).toFloat())
             setPadding(sdp(8), 0, sdp(8), 0)
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_GO
@@ -428,6 +440,7 @@ class FloatingGuideService : Service() {
             settings.textZoom = textZoom
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                    request?.url?.takeIf { it.host == APP_ASSETS_HOST }?.let { return serveAppRequest(it) }
                     return if (shouldBlockRequest(request)) emptyBlockedResponse() else null
                 }
 
@@ -446,7 +459,7 @@ class FloatingGuideService : Service() {
                                 .putInt(KEY_SCROLL_X, lastScrollX)
                                 .putInt(KEY_SCROLL_Y, lastScrollY)
                                 .apply()
-                            addressBar?.setText(it)
+                            addressBar?.setText(displayUrl(it))
                             installScrollBridge(view)
                             recordHistory(it, view?.title)
                             restoreScrollWhenReady()
@@ -486,6 +499,11 @@ class FloatingGuideService : Service() {
             }
             setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
                 downloadUrls.add(url)
+                if (isWebUrl(url) && isPdf(url, contentDisposition, mimeType)) {
+                    // Show web PDFs in the viewer; ⋮ › Download PDF still saves them.
+                    loadUrl(pdfViewerUrl(remotePdfFile(url)))
+                    return@setDownloadListener
+                }
                 enqueueDownload(url, userAgent, contentDisposition, mimeType)
                 // A download never commits, so the back/forward list still holds the real page.
                 val pageUrl = copyBackForwardList().currentItem?.url?.takeIf { isWebUrl(it) }
@@ -493,7 +511,7 @@ class FloatingGuideService : Service() {
                     if (pageUrl != null) tab.url = pageUrl
                     if (isActiveWebView(this)) {
                         lastUrl = tab.url
-                        addressBar?.setText(tab.url)
+                        addressBar?.setText(displayUrl(tab.url))
                     }
                 }
                 saveTabs()
@@ -517,7 +535,7 @@ class FloatingGuideService : Service() {
         lastUrl = active.url
         lastScrollX = active.scrollX
         lastScrollY = active.scrollY
-        addressBar?.setText(active.url)
+        addressBar?.setText(displayUrl(active.url))
         restoreScrollWhenReady()
         saveTabs()
         runFind(findInput?.text?.toString().orEmpty())
@@ -557,9 +575,11 @@ class FloatingGuideService : Service() {
         val tab = tabs.firstOrNull { it.webView == view } ?: return
         url?.takeIf { it.isNotBlank() }?.let { tab.url = it }
         title?.takeIf { it.isNotBlank() }?.let { tab.title = it }
+        // PDF.js titles local guides by their internal ID; show the file name instead.
+        guideTitle(tab.url)?.let { tab.title = it }
         if (isActiveWebView(view)) {
             lastUrl = tab.url
-            addressBar?.setText(tab.url)
+            addressBar?.setText(displayUrl(tab.url))
         }
     }
 
@@ -1344,6 +1364,12 @@ class FloatingGuideService : Service() {
             toggleBookmark(web)
         }
         addMenuItem("Bookmarks", "Open saved bookmarks") { showBookmarksPopup(anchor, web) }
+        addMenuItem("PDF Guides", "Open a PDF guide") { showGuidesPopup(anchor) }
+        remotePdfUrl(currentUrl)?.let { pdfUrl ->
+            addMenuItem("Download PDF", "Save this PDF to Downloads") {
+                enqueueDownload(pdfUrl, web?.settings?.userAgentString, null, "application/pdf")
+            }
+        }
         addMenuItem(if (adBlockEnabled) "Ad Blocker: On" else "Ad Blocker: Off", "Toggle built-in ad blocker") {
             adBlockEnabled = !adBlockEnabled
             prefs.edit().putBoolean(KEY_AD_BLOCK_ENABLED, adBlockEnabled).apply()
@@ -1496,43 +1522,72 @@ class FloatingGuideService : Service() {
         prefs.edit().putString(KEY_HISTORY, array.toString()).apply()
     }
 
-    private fun showBookmarksPopup(anchor: View, web: WebView?) {
+    private class ListPopupItem(
+        val title: String,
+        val detail: String,
+        val onOpen: () -> Unit,
+        val onRemove: () -> Unit,
+    )
+
+    // A header, an optional action row, then a scrollable list whose rows open on tap and remove on ×.
+    private fun showListPopup(
+        anchor: View,
+        header: String,
+        emptyText: String,
+        items: List<ListPopupItem>,
+        action: Pair<String, () -> Unit>? = null,
+    ) {
         lateinit var popup: PopupWindow
-        val bookmarks = loadBookmarks()
         val menu = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = roundedDrawable(0xFF252A33.toInt(), 0xFF3A404B.toInt(), sdp(8).toFloat())
             setPadding(sdp(6), sdp(6), sdp(6), sdp(6))
         }
 
-        val header = TextView(this).apply {
-            text = "Bookmarks"
+        val headerView = TextView(this).apply {
+            text = header
             textSize = scaledSp(13f)
             setTextColor(0xFFA9ADB5.toInt())
             setPadding(sdp(12), sdp(8), sdp(12), sdp(8))
             minWidth = historyMenuWidth()
         }
-        menu.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+        menu.addView(headerView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
 
-        if (bookmarks.isEmpty()) {
-            val empty = TextView(this).apply {
-                text = "No bookmarks yet"
+        action?.let { (label, onClick) ->
+            val actionView = TextView(this).apply {
+                text = label
+                contentDescription = label
                 textSize = scaledSp(14f)
                 setTextColor(Color.WHITE)
+                setPadding(sdp(12), sdp(10), sdp(12), sdp(10))
+                minWidth = historyMenuWidth()
+                setOnClickListener {
+                    popup.dismiss()
+                    onClick()
+                }
+            }
+            menu.addView(actionView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
+        }
+
+        if (items.isEmpty()) {
+            val empty = TextView(this).apply {
+                text = emptyText
+                textSize = scaledSp(14f)
+                setTextColor(0xFFA9ADB5.toInt())
                 setPadding(sdp(12), sdp(10), sdp(12), sdp(10))
                 minWidth = historyMenuWidth()
             }
             menu.addView(empty, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, menuItemHeight()))
         } else {
             val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            bookmarks.forEach { bookmark ->
+            items.forEach { item ->
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                 }
                 val title = TextView(this).apply {
-                    text = bookmark.title.ifBlank { bookmark.url }
-                    contentDescription = "Open ${bookmark.url}"
+                    text = item.title
+                    contentDescription = "Open ${item.title}"
                     textSize = scaledSp(14f)
                     setTextColor(Color.WHITE)
                     setSingleLine(true)
@@ -1541,21 +1596,21 @@ class FloatingGuideService : Service() {
                     gravity = Gravity.CENTER_VERTICAL
                     setOnClickListener {
                         popup.dismiss()
-                        web?.loadUrl(bookmark.url)
+                        item.onOpen()
                     }
                     setOnLongClickListener {
-                        Toast.makeText(this@FloatingGuideService, bookmark.url, Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@FloatingGuideService, item.detail, Toast.LENGTH_SHORT).show()
                         true
                     }
                 }
                 val remove = TextView(this).apply {
                     text = "×"
-                    contentDescription = "Remove bookmark ${bookmark.title}"
+                    contentDescription = "Remove ${item.title}"
                     gravity = Gravity.CENTER
                     textSize = scaledSp(18f)
                     setTextColor(0xFFFFD0C8.toInt())
                     setOnClickListener {
-                        removeBookmark(bookmark.url)
+                        item.onRemove()
                         list.removeView(row)
                         if (list.childCount == 0) popup.dismiss()
                     }
@@ -1566,7 +1621,7 @@ class FloatingGuideService : Service() {
             }
             // Cap the visible rows so a long list scrolls instead of running off screen.
             val scroller = ScrollView(this).apply { addView(list) }
-            val visibleRows = bookmarks.size.coerceAtMost(BOOKMARK_MENU_VISIBLE_ROWS)
+            val visibleRows = items.size.coerceAtMost(LIST_MENU_VISIBLE_ROWS)
             menu.addView(scroller, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, visibleRows * menuItemHeight()))
         }
 
@@ -1575,6 +1630,30 @@ class FloatingGuideService : Service() {
             elevation = sdp(8).toFloat()
         }
         showPopupAboveBubble(popup, anchor, -historyMenuHorizontalOffset(), sdp(4))
+    }
+
+    private fun showBookmarksPopup(anchor: View, web: WebView?) {
+        val items = loadBookmarks().map { bookmark ->
+            ListPopupItem(
+                title = bookmark.title.ifBlank { bookmark.url },
+                detail = bookmark.url,
+                onOpen = { web?.loadUrl(bookmark.url) },
+                onRemove = { removeBookmark(bookmark.url) },
+            )
+        }
+        showListPopup(anchor, "Bookmarks", "No bookmarks yet", items)
+    }
+
+    private fun showGuidesPopup(anchor: View) {
+        val items = loadGuides().map { guide ->
+            ListPopupItem(
+                title = guide.title,
+                detail = guide.title,
+                onOpen = { openGuide(guide) },
+                onRemove = { removeGuide(guide.id) },
+            )
+        }
+        showListPopup(anchor, "PDF Guides", "No guides yet", items, action = "+ Open PDF…" to { pickPdfGuide() })
     }
 
     private fun toggleBookmark(web: WebView?) {
@@ -1628,21 +1707,208 @@ class FloatingGuideService : Service() {
         if (params?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
             chooser.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
+        launchPicker(chooser, persist = false) { uris -> callback.onReceiveValue(uris) }
+    }
+
+    // persist = true keeps read access to the picked files across restarts (for PDF guides).
+    private fun launchPicker(chooser: Intent, persist: Boolean, onResult: (Array<Uri>?) -> Unit) {
         val reopenBrowser = browserAttached && !browserMinimized
         FileChooserActivity.pendingCallback = { uris ->
-            callback.onReceiveValue(uris)
             if (reopenBrowser && isRunning) showBrowser(lastUrl)
+            onResult(uris)
         }
         // Overlays draw above activities, so the browser has to step aside for the picker.
         hideBrowser(returnToBubble = true)
         val intent = Intent(this, FileChooserActivity::class.java)
             .putExtra(FileChooserActivity.EXTRA_CHOOSER_INTENT, chooser)
+            .putExtra(FileChooserActivity.EXTRA_PERSIST, persist)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { startActivity(intent) }.onFailure {
             FileChooserActivity.pendingCallback?.invoke(null)
             FileChooserActivity.pendingCallback = null
             Toast.makeText(this, "Can't open the file picker", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun pickPdfGuide() {
+        val chooser = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("application/pdf")
+        launchPicker(chooser, persist = true) { uris ->
+            uris?.firstOrNull()?.let { openGuide(addGuide(it)) }
+        }
+    }
+
+    private fun addGuide(uri: Uri): Guide {
+        val key = uri.toString()
+        val id = UUID.nameUUIDFromBytes(key.toByteArray()).toString().replace("-", "").take(16)
+        val title = runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment ?: "PDF guide"
+        val guide = Guide(id, title, key, System.currentTimeMillis())
+        val others = loadGuides().filterNot { it.id == id }
+        val kept = (listOf(guide) + others).take(MAX_GUIDES)
+        // Give back file access for guides that fell off the list.
+        (others - kept.toSet()).forEach { releaseGuideAccess(it) }
+        saveGuides(kept)
+        return guide
+    }
+
+    private fun openGuide(guide: Guide) {
+        saveGuides(listOf(guide.copy(openedAt = System.currentTimeMillis())) + loadGuides().filterNot { it.id == guide.id })
+        openInTab(pdfViewerUrl("/guide/${guide.id}"))
+    }
+
+    private fun removeGuide(id: String) {
+        val guides = loadGuides()
+        guides.firstOrNull { it.id == id }?.let { releaseGuideAccess(it) }
+        saveGuides(guides.filterNot { it.id == id })
+    }
+
+    private fun releaseGuideAccess(guide: Guide) {
+        runCatching { contentResolver.releasePersistableUriPermission(Uri.parse(guide.uri), Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    }
+
+    private fun loadGuides(): List<Guide> {
+        val raw = prefs.getString(KEY_GUIDES, "[]") ?: "[]"
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                Guide(
+                    id = item.optString("id"),
+                    title = item.optString("title"),
+                    uri = item.optString("uri"),
+                    openedAt = item.optLong("openedAt"),
+                )
+            }.filter { it.id.isNotBlank() && it.uri.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveGuides(guides: List<Guide>) {
+        val array = JSONArray()
+        guides.forEach { guide ->
+            array.put(JSONObject().apply {
+                put("id", guide.id)
+                put("title", guide.title)
+                put("uri", guide.uri)
+                put("openedAt", guide.openedAt)
+            })
+        }
+        prefs.edit().putString(KEY_GUIDES, array.toString()).apply()
+    }
+
+    // Opens in a new tab so the page you were on stays put; reuses the current tab at the tab limit.
+    private fun openInTab(url: String) {
+        if (tabs.size < MAX_TABS) newTab(url) else webView?.loadUrl(url)
+    }
+
+    // PDFs are shown by the bundled PDF.js viewer, served from a private https origin. The viewer only
+    // opens files from its own origin, so local guides and web PDFs are served from that origin too.
+    private fun pdfViewerUrl(file: String): String =
+        "https://$APP_ASSETS_HOST$PDF_VIEWER_PATH?file=${URLEncoder.encode(file, "UTF-8")}"
+
+    private fun remotePdfFile(url: String): String = "/remote?url=${URLEncoder.encode(url, "UTF-8")}"
+
+    // The PDF a viewer URL points at: "/guide/<id>" or "/remote?url=…", or null for other pages.
+    private fun pdfViewerFile(url: String?): String? {
+        val uri = url?.let { Uri.parse(it) } ?: return null
+        if (uri.host != APP_ASSETS_HOST || uri.path != PDF_VIEWER_PATH) return null
+        return runCatching { uri.getQueryParameter("file") }.getOrNull()
+    }
+
+    private fun remotePdfUrl(url: String?): String? =
+        pdfViewerFile(url)?.takeIf { it.startsWith("/remote?") }?.let { Uri.parse("https://$APP_ASSETS_HOST$it").getQueryParameter("url") }
+
+    // What the address bar shows: the PDF's name or web address instead of the viewer's internal URL.
+    private fun displayUrl(url: String): String {
+        pdfViewerFile(url) ?: return url
+        remotePdfUrl(url)?.let { return it }
+        return "PDF: " + (guideTitle(url) ?: "guide")
+    }
+
+    private fun guideTitle(url: String): String? {
+        val id = pdfViewerFile(url)?.takeIf { it.startsWith("/guide/") }?.removePrefix("/guide/") ?: return null
+        return loadGuides().firstOrNull { it.id == id }?.title
+    }
+
+    private fun isPdf(url: String, contentDisposition: String?, mimeType: String?): Boolean =
+        mimeType.equals("application/pdf", ignoreCase = true) ||
+            URLUtil.guessFileName(url, contentDisposition, mimeType).endsWith(".pdf", ignoreCase = true)
+
+    // Called on a WebView background thread for every request to the private origin.
+    private fun serveAppRequest(uri: Uri): WebResourceResponse {
+        val path = uri.path.orEmpty()
+        return when {
+            path.startsWith("/pdfjs/") -> serveAsset(path.removePrefix("/"))
+            path.startsWith("/guide/") -> serveGuide(path.removePrefix("/guide/"))
+            path == "/remote" -> serveRemotePdf(uri.getQueryParameter("url"))
+            else -> errorResponse(404, "Not Found")
+        }
+    }
+
+    private fun serveAsset(name: String): WebResourceResponse {
+        if (name.contains("..")) return errorResponse(404, "Not Found")
+        if (name == PDF_VIEWER_EXTRA_CSS_ASSET) {
+            return WebResourceResponse("text/css", "utf-8", 200, "OK", emptyMap(), ByteArrayInputStream(PDF_VIEWER_EXTRA_CSS.toByteArray()))
+        }
+        val stream = runCatching { assets.open(name) }.getOrNull() ?: return errorResponse(404, "Not Found")
+        val body = if (name == PDF_VIEWER_ASSET) {
+            // Hide viewer buttons that don't work inside the overlay; the ⋮ menu covers them. The viewer's
+            // CSP blocks inline styles, so link a same-origin stylesheet instead.
+            val html = stream.bufferedReader().use { it.readText() }
+            val link = "<link rel=\"stylesheet\" href=\"${PDF_VIEWER_EXTRA_CSS_ASSET.substringAfterLast('/')}\" />"
+            ByteArrayInputStream(html.replace("</head>", "$link</head>").toByteArray())
+        } else {
+            stream
+        }
+        return WebResourceResponse(assetMimeType(name), null, 200, "OK", emptyMap(), body)
+    }
+
+    private fun serveGuide(id: String): WebResourceResponse {
+        val guide = loadGuides().firstOrNull { it.id == id } ?: return errorResponse(404, "Not Found")
+        val stream = runCatching { contentResolver.openInputStream(Uri.parse(guide.uri)) }.getOrNull()
+            ?: return errorResponse(404, "Not Found")
+        return WebResourceResponse("application/pdf", null, 200, "OK", emptyMap(), stream)
+    }
+
+    private fun serveRemotePdf(url: String?): WebResourceResponse {
+        if (url == null || !isWebUrl(url)) return errorResponse(400, "Bad Request")
+        return runCatching {
+            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = REMOTE_PDF_TIMEOUT_MS
+                readTimeout = REMOTE_PDF_TIMEOUT_MS
+                setRequestProperty("User-Agent", WebSettings.getDefaultUserAgent(this@FloatingGuideService))
+                CookieManager.getInstance().getCookie(url)?.let { setRequestProperty("Cookie", it) }
+            }
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                connection.disconnect()
+                errorResponse(502, "Bad Gateway")
+            } else {
+                WebResourceResponse("application/pdf", null, 200, "OK", emptyMap(), connection.inputStream)
+            }
+        }.getOrElse { errorResponse(502, "Bad Gateway") }
+    }
+
+    private fun errorResponse(code: Int, reason: String): WebResourceResponse =
+        WebResourceResponse("text/plain", "utf-8", code, reason, emptyMap(), ByteArrayInputStream(ByteArray(0)))
+
+    private fun assetMimeType(name: String): String = when (name.substringAfterLast('.').lowercase()) {
+        "html" -> "text/html"
+        "mjs", "js" -> "text/javascript"
+        "css" -> "text/css"
+        "json" -> "application/json"
+        "ftl" -> "text/plain"
+        "svg" -> "image/svg+xml"
+        "png" -> "image/png"
+        "gif" -> "image/gif"
+        "wasm" -> "application/wasm"
+        "ttf" -> "font/ttf"
+        "otf" -> "font/otf"
+        else -> "application/octet-stream"
     }
 
     private fun showFullscreenVideo(view: View, callback: WebChromeClient.CustomViewCallback) {
@@ -1870,6 +2136,16 @@ class FloatingGuideService : Service() {
         private const val KEY_SCROLL_BY_URL = "scroll_by_url"
         private const val KEY_HISTORY = "browser_history"
         private const val KEY_BOOKMARKS = "browser_bookmarks"
+        private const val KEY_GUIDES = "pdf_guides"
+        private const val MAX_GUIDES = 20
+        private const val APP_ASSETS_HOST = "appassets.androidplatform.net"
+        private const val PDF_VIEWER_PATH = "/pdfjs/web/viewer.html"
+        private const val PDF_VIEWER_ASSET = "pdfjs/web/viewer.html"
+        private const val REMOTE_PDF_TIMEOUT_MS = 30_000
+        private const val PDF_VIEWER_EXTRA_CSS_ASSET = "pdfjs/web/boredbrowser.css"
+        private const val PDF_VIEWER_EXTRA_CSS =
+            "#secondaryOpenFile,#printButton,#secondaryPrint,#downloadButton,#secondaryDownload," +
+                "#editorModeButtons,#editorModeSeparator{display:none!important}"
         private const val KEY_TABS = "browser_tabs"
         private const val KEY_ACTIVE_TAB = "active_tab"
         private const val KEY_AD_BLOCK_ENABLED = "ad_block_enabled"
@@ -1893,7 +2169,7 @@ class FloatingGuideService : Service() {
         private const val SCROLL_RESTORE_ATTEMPTS = 16
         private const val MAX_HISTORY_ENTRIES = 100
         private const val HISTORY_MENU_LIMIT = 12
-        private const val BOOKMARK_MENU_VISIBLE_ROWS = 8
+        private const val LIST_MENU_VISIBLE_ROWS = 8
         private const val MAX_TABS = 4
         private const val DEFAULT_URL = "https://www.google.com"
         private const val KOFI_URL = "https://ko-fi.com/boredgamingph"
