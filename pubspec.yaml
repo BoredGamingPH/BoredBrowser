@@ -1,7 +1,7 @@
 name: boredbrowser
 description: "A lightweight Android floating browser with a draggable chat-head style bubble."
 publish_to: 'none'
-version: 1.0.0+2
+version: 0.5.0+5
 
 environment:
   sdk: ^3.12.1
